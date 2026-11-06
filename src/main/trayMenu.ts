@@ -11,32 +11,17 @@ import aboutHtml from "file://about.html?minify";
 import updater from "./updater";
 import { SETTINGS_DIR, THEMES_DIR } from "./utils/constants";
 
+const isTrayMenu = (template: MenuItemConstructorOptions[]) =>
+    template.length > 0
+    && template.at(-1)?.role === "quit"
+    && !template.some(item => item.label === "&File" || item.label === "File" || item.label === "&Edit" || item.label === "Edit");
+
 function findInsertIndex(template: MenuItemConstructorOptions[]): number {
     const openIndex = template.findIndex(item => {
         const label = item.label?.toLowerCase() ?? "";
         return label.includes("open") || label.includes("show");
     });
     return openIndex !== -1 ? openIndex + 1 : 0;
-}
-
-function isTrayMenu(template: MenuItemConstructorOptions[]): boolean {
-    if (!template.length) return false;
-
-    const hasOpenOrShow = template.some(item => {
-        const label = item.label?.toLowerCase() ?? "";
-        return label.includes("open") || label.includes("show");
-    });
-
-    const hasQuit = template.some(item =>
-        item.label?.toLowerCase().includes("quit") || item.role === "quit"
-    );
-
-    const isNotAppMenu = !template.some(item =>
-        item.label === "&File" || item.label === "File" ||
-        item.label === "&Edit" || item.label === "Edit"
-    );
-
-    return hasOpenOrShow && hasQuit && isNotAppMenu;
 }
 
 let aboutWindow: BrowserWindow | null = null;
@@ -79,9 +64,13 @@ const notify = (window: BaseWindow | undefined, title: string, message: string) 
         ? dialog.showMessageBox(window, { title, message })
         : dialog.showMessageBox({ title, message });
 
+let isUpdating = false;
+
 function createVencordMenuItems(): MenuItemConstructorOptions[] {
     return [
+        { type: "separator" },
         {
+            id: "hellocord",
             label: "Hellocord",
             submenu: [
                 {
@@ -90,7 +79,11 @@ function createVencordMenuItems(): MenuItemConstructorOptions[] {
                 },
                 {
                     label: "Update Hellocord",
+                    visible: !IS_UPDATER_DISABLED,
                     async click(_item, window) {
+                        if (isUpdating) return;
+                        isUpdating = true;
+
                         try {
                             const updateAvailable = await updater.fetchUpdate();
                             if (!updateAvailable) {
@@ -107,6 +100,8 @@ function createVencordMenuItems(): MenuItemConstructorOptions[] {
                             app.exit();
                         } catch (e) {
                             notify(window, "Update Error", `An error occurred while updating Hellocord.\n\n${String(e)}`);
+                        } finally {
+                            isUpdating = false;
                         }
                     }
                 },
@@ -120,7 +115,7 @@ function createVencordMenuItems(): MenuItemConstructorOptions[] {
                     click: () => shell.openPath(THEMES_DIR)
                 }
             ]
-        },
+        }
     ];
 }
 
@@ -128,7 +123,7 @@ export function patchTrayMenu(): void {
     const originalBuildFromTemplate = Menu.buildFromTemplate;
 
     Menu.buildFromTemplate = function (template: MenuItemConstructorOptions[]) {
-        const alreadyPatched = template.some(item => item.label === "Hellocord");
+        const alreadyPatched = template.some(item => item.id === "hellocord" || item.label === "Hellocord");
         if (isTrayMenu(template) && !alreadyPatched) {
             const insertIndex = findInsertIndex(template);
             const vencordItems = createVencordMenuItems();

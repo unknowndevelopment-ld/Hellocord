@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { Devs } from "@utils/constants";
 import definePlugin, { PluginNative } from "@utils/types";
 import { saveFile } from "@utils/web";
 import { showToast, UserSettingsActionCreators } from "@webpack/common";
@@ -470,7 +471,7 @@ function scheduleScan() {
 export default definePlugin({
     name: "GIF Downloader",
     description: "Downloads favorite GIFs. On first download, choose a folder (Documents/GIFS by default); the location is remembered for future downloads.",
-    authors: [{ name: "Unknown Development", id: 0n }],
+    authors: [Devs.UnknownDevelopment],
     tags: ["Emotes", "Utility"],
     enabledByDefault: true,
     start() {

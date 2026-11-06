@@ -5,6 +5,7 @@
  */
 
 import { definePluginSettings } from "@api/Settings";
+import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
 import { showToast, UserSettingsActionCreators } from "@webpack/common";
 
@@ -1000,7 +1001,7 @@ function scheduleScan() {
 export default definePlugin({
     name: "GIF Categories",
     description: "Right-click GIF favorites to organize them into persistent categories shown at the top of the Favorites picker.",
-    authors: [{ name: "Unknown Development", id: 0n }],
+    authors: [Devs.UnknownDevelopment],
     tags: ["Emotes", "Utility"],
     settings,
     enabledByDefault: true,

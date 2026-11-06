@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { Devs } from "@utils/constants";
 import definePlugin from "@utils/types";
 import { showToast, UserSettingsActionCreators } from "@webpack/common";
 
@@ -281,7 +282,7 @@ function scheduleFullScan() {
 export default definePlugin({
     name: "Bulk Favorite GIFs",
     description: "Adds a star button at the top right of messages containing multiple GIFs to favorite them all at once.",
-    authors: [{ name: "Unknown Development", id: 0n }],
+    authors: [Devs.UnknownDevelopment],
     tags: ["Emotes", "Utility"],
     enabledByDefault: true,
     start() {

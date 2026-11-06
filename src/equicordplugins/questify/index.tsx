@@ -33,7 +33,7 @@ import { normalizeQuestName } from "./utils/filtering";
 import { notifyQuestCompletion, QL } from "./utils/logging";
 import { getQuestEmbedProgress, getQuestPanelOverride, getQuestPanelPercentComplete, shouldForceQuestPanelVisible } from "./utils/questState";
 import { getLastFilterChoices, getLastSortChoice, getQuestTileClasses, getQuestTileStyle, setLastFilterChoices, setLastSortChoice, shouldPreloadQuestAssets, sortQuests } from "./utils/questTiles";
-import { formatLowerBadge, QUEST_PAGE } from "./utils/ui";
+import { QUEST_PAGE } from "./utils/ui";
 
 let isPluginStarted = false;
 let activeAccountUserId: string | null = null;
@@ -42,7 +42,7 @@ let didAttemptAutoCompleteResume = false;
 const notifiedCompletedQuests = new Set<string>();
 export const enabledOnStartup = PlainSettings.plugins.Questify?.enabled;
 
-function createQuestEnrollmentGuard(): () => boolean {
+export function createQuestEnrollmentGuard(): () => boolean {
     const userId = getCurrentUserId();
     const generation = accountSessionGeneration;
 
@@ -141,7 +141,6 @@ export default definePlugin({
     createQuestEnrollmentGuard,
     disguiseHomeButton,
     enrolledIncompleteButton,
-    formatLowerBadge,
     getActiveAutoCompletes,
     getQuestProcessingBatches,
     getLastFilterChoices,
@@ -182,14 +181,6 @@ export default definePlugin({
             }
         },
         {
-            // Exports the guildless server list item component used by the Quest button.
-            find: '="DOWNLOAD_APPS";function',
-            replacement: {
-                match: /(?<=\i\.\i\(\i,\{)(?=\i:\(\)=>\i.{0,30000}?let (\i)=function\(\i\)\{let\{ref:)/,
-                replace: "GuildlessServerListItemComponent:()=>$1,"
-            }
-        },
-        {
             // Prevents the DMs Quests tab from counting as part of the
             // DM button highlight logic while the Quest button is visible.
             find: "GLOBAL_DISCOVERY),",
@@ -225,7 +216,7 @@ export default definePlugin({
             predicate: () => getQuestifySettings().disableQuestsEverything || getQuestifySettings().disableRelocationNotices,
             replacement: [
                 {
-                    match: /GLOBAL_DISCOVERY_TABS/g,
+                    match: /\i\.\i(?=\.filter\(\i=>\(\i!==\i\.GlobalDiscoveryTab\.QUESTS)/,
                     replace: '$&.filter(tab=>tab!=="quests")'
                 }
             ]
@@ -284,7 +275,7 @@ export default definePlugin({
                 },
                 {
                     // QUESTS_FETCH_QUEST_TO_DELIVER_BEGIN
-                    match: /(?=let \i=Date.now\(\);\i.recordQuestRequestAttempt.{0,50}QUESTS_FETCH_QUEST_TO_DELIVER_BEGIN)/,
+                    match: /(?=let \i=Date.now\(\),\i=\i.recordQuestRequestAttempt.{0,50}QUESTS_FETCH_QUEST_TO_DELIVER_BEGIN)/,
                     replace: "return;"
                 }
             ]
@@ -370,17 +361,8 @@ export default definePlugin({
             ]
         },
         {
-            // Prevent Video Quests from pausing on lost focus.
-            find: "[QV] | Pausing video | playerState:",
-            predicate: () => !getQuestifySettings().disableQuestsEverything && getQuestifySettings().preventVideoQuestsPausing,
-            replacement: {
-                match: /(?<=setCaptionEnabled\),)({focused:)(\i)/,
-                replace: "$2=true,$1questifyFocused"
-            }
-        },
-        {
-            // Prevent Video Quests from pausing on lost focus.
-            find: ",listenForHlsErrors:!1",
+            // Prevents video quests from pausing on lost focus or visibility.
+            find: "trackQuestVideoFocusChange:",
             predicate: () => !getQuestifySettings().disableQuestsEverything && getQuestifySettings().preventVideoQuestsPausing,
             replacement: {
                 match: /(?<=pauseOnLostVisibility:)!\i/,
@@ -477,7 +459,7 @@ export default definePlugin({
             ]
         },
         {
-            find: 'STEP_2_CLICKED_INTERNAL,"quest_embed_card_footer',
+            find: ".GameProfileSources.QuestEmbed,",
             group: true,
             predicate: () => !getQuestifySettings().disableQuestsEverything,
             replacement: [
@@ -595,36 +577,13 @@ export default definePlugin({
         {
             // Allow non-shareable Quests to embed in chat and to have
             // their share URLs copyable from the embed context menu.
-            find: "NOT_SHAREABLE}function",
+            find: ".sharePolicy!==",
             group: true,
             predicate: () => !getQuestifySettings().disableQuestsEverything,
             replacement: {
                 match: /(?<=return )(?=\i.sharePolicy!==\i.\i.NOT_SHAREABLE)/,
                 replace: "true||"
             }
-        },
-        {
-            // Adds a maxDigits prop to the LowerBadge component which allows for not truncating, or for truncating at a specific threshold.
-            find: ".BADGE_NOTIFICATION_BACKGROUND.css,disableColor",
-            group: true,
-            replacement: [
-                {
-                    // Extracts the custom maxDigits prop.
-                    match: /(\(\i\){let{count:\i,)/,
-                    replace: "$1maxDigits,"
-                },
-                {
-                    // Passes maxDigits to the rounding function.
-                    match: /(children:\i\(\i)/,
-                    replace: "$1,maxDigits"
-                },
-                {
-                    // Makes use of the custom prop if provided by using custom logic for negatives and
-                    // truncation. If the prop is not provided, assume default behavior for native badges.
-                    match: /(?<=function \i\((\i))(\){return )(\i<1e3.{0,60}?k\+`)/,
-                    replace: ",maxDigits$2maxDigits===undefined?($3):$self.formatLowerBadge($1,maxDigits)[0]"
-                }
-            ]
         },
     ],
 
