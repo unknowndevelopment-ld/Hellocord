@@ -10,7 +10,12 @@ import definePlugin, { OptionType } from "@utils/types";
 import { showToast, UserSettingsActionCreators } from "@webpack/common";
 
 type Category = { id: string; name: string };
-type CategoryData = { categories: Category[]; assignments: Record<string, string[]> };
+type CategoryData = {
+    categories: Category[];
+    assignments: Record<string, string[]>;
+    /** Keys per category, newest addition first, so new GIFs appear on top. */
+    order: Record<string, string[]>;
+};
 
 // Discord hashes its class names per build, so keep the old explicit class as
 // a fallback and otherwise identify result cards by structure (role=button
@@ -109,17 +114,37 @@ const settings = definePluginSettings({
 function loadData(): CategoryData {
     try {
         const parsed = JSON.parse(settings.store.data || "{}");
+        const order: Record<string, string[]> = {};
+        if (parsed.order && typeof parsed.order === "object") {
+            for (const [categoryId, keys] of Object.entries(parsed.order)) {
+                if (Array.isArray(keys)) order[categoryId] = keys.filter((key): key is string => typeof key === "string");
+            }
+        }
         return {
             categories: Array.isArray(parsed.categories) ? parsed.categories.filter((c: any) => c && typeof c.id === "string" && typeof c.name === "string") : [],
-            assignments: parsed.assignments && typeof parsed.assignments === "object" ? parsed.assignments : {}
+            assignments: parsed.assignments && typeof parsed.assignments === "object" ? parsed.assignments : {},
+            order
         };
     } catch {
-        return { categories: [], assignments: {} };
+        return { categories: [], assignments: {}, order: {} };
     }
 }
 
 function saveData(data: CategoryData) {
     settings.store.data = JSON.stringify(data);
+}
+
+/** Record a key as the newest entry of a category so it renders at the top. */
+function noteAddedEntry(data: CategoryData, categoryId: string, key: string) {
+    const list = (data.order[categoryId] || []).filter(existing => existing !== key);
+    list.unshift(key);
+    data.order[categoryId] = list;
+}
+
+function forgetEntry(data: CategoryData, categoryId: string, key: string) {
+    const list = (data.order[categoryId] || []).filter(existing => existing !== key);
+    if (list.length) data.order[categoryId] = list;
+    else delete data.order[categoryId];
 }
 
 function getFavoriteStore() {
@@ -291,12 +316,16 @@ async function importBackup(file: File) {
             }, 0);
         }
 
-        for (const item of importedItems) {
+        // Import newest-last in the manifest, so walk it backwards to keep the
+        // same "most recent on top" order as manual additions.
+        for (const item of [...importedItems].reverse()) {
             const key = actualKeyByImportedKey.get(item.key) || canonicalKey(item.key);
             const categories = (Array.isArray(item.categories) ? item.categories : [])
                 .map(id => categoryIdMap.get(id))
                 .filter((id): id is string => !!id);
-            if (categories.length) data.assignments[key] = [...new Set([...(data.assignments[key] || []), ...categories])];
+            if (!categories.length) continue;
+            data.assignments[key] = [...new Set([...(data.assignments[key] || []), ...categories])];
+            for (const id of categories) noteAddedEntry(data, id, key);
         }
         saveData(data);
         selectedCategory = null;
@@ -507,6 +536,7 @@ function deleteCategory(category: Category) {
         if (remaining.length) data.assignments[key] = remaining;
         else delete data.assignments[key];
     }
+    delete data.order[category.id];
     saveData(data);
     if (selectedCategory === category.id) selectedCategory = null;
     scheduleScan();
@@ -581,9 +611,99 @@ function menuButton(label: string, onClick: () => void, checked = false) {
     return button;
 }
 
+function favoriteGifEntries(): Record<string, any> {
+    try {
+        return (UserSettingsActionCreators as any).FrecencyUserSettingsActionCreators.getCurrentValue()?.favoriteGifs?.gifs || {};
+    } catch {
+        return {};
+    }
+}
+
+/**
+ * Rendering a trending GIF and storing it as a favorite can use different
+ * URLs (preview media vs. the Tenor/Klipy page), so remember the mapping for
+ * the rest of the session; otherwise the same card would look unassigned and
+ * could be added twice.
+ */
+const resolvedFavoriteKeys = new Map<string, string>();
+
+/** Map a rendered card to the key Discord actually stores it under. */
+function storedKeyFor(card: Element, key: string): string {
+    const media = canonicalKey(cardMediaUrl(card) || key);
+    const mapped = resolvedFavoriteKeys.get(key) || resolvedFavoriteKeys.get(media);
+    if (mapped) return mapped;
+
+    const gifs = favoriteGifEntries();
+    for (const raw of Object.keys(gifs)) {
+        const canonical = canonicalKey(raw);
+        if (canonical === key) return canonical;
+    }
+    for (const [raw, gif] of Object.entries(gifs)) {
+        if (canonicalKey(String(gif?.src || "")) === media) return canonicalKey(raw);
+    }
+    return key;
+}
+
+/**
+ * Categories are built from Discord's favorite GIFs, so a GIF that is only a
+ * trending/search result has to be favorited before it can show up in one.
+ * Prefer Discord's own star so the stored entry is exactly what it would have
+ * written, then resolve the key it actually used (Discord stores Tenor/Klipy
+ * items under their page URL, not the media URL).
+ */
+async function ensureFavorite(card: Element, key: string): Promise<string> {
+    const before = favoriteGifEntries();
+    if (Object.keys(before).some(raw => canonicalKey(raw) === key)) return key;
+
+    const control = favoriteControl(card);
+    if (!control || !/^add\b/i.test((control.getAttribute("aria-label") || "").trim())) return key;
+
+    const media = canonicalKey(cardMediaUrl(card) || key);
+    control.click();
+
+    for (let attempt = 0; attempt < 30; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        const current = favoriteGifEntries();
+        const added = Object.keys(current).filter(raw => !(raw in before));
+        if (!added.length) continue;
+        const bySource = added.find(raw => canonicalKey(String(current[raw]?.src || "")) === media);
+        const chosen = bySource || (added.length === 1 ? added[0] : null);
+        if (!chosen) continue;
+        const stored = canonicalKey(chosen);
+        resolvedFavoriteKeys.set(key, stored);
+        resolvedFavoriteKeys.set(media, stored);
+        return stored;
+    }
+    return key;
+}
+
+async function toggleAssignment(card: Element, key: string, category: Category, isAssigned: boolean) {
+    if (!isAssigned) {
+        const savedKey = await ensureFavorite(card, key);
+        const next = loadData();
+        next.assignments[savedKey] = [...new Set([...(next.assignments[savedKey] || []), category.id])];
+        noteAddedEntry(next, category.id, savedKey);
+        saveData(next);
+        scheduleScan();
+        showToast({ text: `Added to ${category.name}`, variant: "success" } as any);
+        return;
+    }
+
+    const next = loadData();
+    next.assignments[key] = (next.assignments[key] || []).filter(id => id !== category.id);
+    if (!next.assignments[key].length) delete next.assignments[key];
+    forgetEntry(next, category.id, key);
+    saveData(next);
+    scheduleScan();
+}
+
 function showContextMenu(event: MouseEvent, card: Element, cards: Element[]) {
-    const key = cardKey(card, cards);
-    if (!key) return;
+    const cardKeyValue = cardKey(card, cards);
+    if (!cardKeyValue) return;
+    // Discord can store the favorite under a different key than the rendered
+    // media URL (Klipy/Tenor use their page URL), so resolve to the stored key
+    // or the category checkbox would never reflect reality.
+    const key = storedKeyFor(card, cardKeyValue);
 
     event.preventDefault();
     event.stopPropagation();
@@ -609,26 +729,26 @@ function showContextMenu(event: MouseEvent, card: Element, cards: Element[]) {
     }
 
     for (const category of data.categories) {
+        const isAssigned = assigned.has(category.id);
         menu.append(menuButton(category.name, () => {
-            const next = loadData();
-            const ids = new Set(next.assignments[key] || []);
-            if (ids.has(category.id)) ids.delete(category.id);
-            else ids.add(category.id);
-            if (ids.size) next.assignments[key] = [...ids];
-            else delete next.assignments[key];
-            saveData(next);
             closeMenu();
-            scheduleScan();
-        }, assigned.has(category.id)));
+            void toggleAssignment(card, key, category, isAssigned);
+        }, isAssigned));
     }
 
     menu.append(menuButton("＋  New category…", () => {
         closeMenu();
         createCategory(id => {
-            const next = loadData();
-            next.assignments[key] = [...new Set([...(next.assignments[key] || []), id])];
-            saveData(next);
-            scheduleScan();
+            void (async () => {
+                // A category can only render GIFs that are actually favorites,
+                // so favoriting has to happen before the assignment is saved.
+                const savedKey = await ensureFavorite(card, key);
+                const next = loadData();
+                next.assignments[savedKey] = [...new Set([...(next.assignments[savedKey] || []), id])];
+                noteAddedEntry(next, id, savedKey);
+                saveData(next);
+                scheduleScan();
+            })();
         });
     }));
 
@@ -900,22 +1020,43 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
         || resultContainers()[0];
     if (!results) return;
 
-    const matches: Array<{ key: string; src: string; format: number; width: number; height: number }> = [];
+    const assigned = new Map<string, { key: string; src: string; format: number; width: number; height: number }>();
+    const favoriteOrder = new Map<string, number>();
     try {
         const gifs = (UserSettingsActionCreators as any).FrecencyUserSettingsActionCreators.getCurrentValue()?.favoriteGifs?.gifs || {};
         for (const [key, gif] of Object.entries(gifs) as Array<[string, any]>) {
             const canonical = canonicalKey(key);
             if (!(data.assignments[canonical] || []).includes(categoryId)) continue;
-            matches.push({
+            assigned.set(canonical, {
                 key: canonical,
                 src: typeof gif?.src === "string" && gif.src ? gif.src : key,
                 format: Number(gif?.format) || 1,
                 width: Number(gif?.width) || 0,
                 height: Number(gif?.height) || 0
             });
+            favoriteOrder.set(canonical, Number(gif?.order) || 0);
         }
     } catch (error) {
         console.error("[FavoriteGifCategories] Failed to read favorites", error);
+    }
+
+    // Newest addition first. Anything assigned before order tracking existed
+    // falls back to Discord's favorite order (again newest first).
+    const matches: Array<{ key: string; src: string; format: number; width: number; height: number }> = [];
+    const seen = new Set<string>();
+    for (const orderedKey of data.order[categoryId] || []) {
+        const canonical = canonicalKey(orderedKey);
+        const entry = assigned.get(canonical);
+        if (!entry || seen.has(canonical)) continue;
+        matches.push(entry);
+        seen.add(canonical);
+    }
+    const remaining = [...assigned.entries()]
+        .filter(([canonical]) => !seen.has(canonical))
+        .sort((a, b) => (favoriteOrder.get(b[0]) || 0) - (favoriteOrder.get(a[0]) || 0));
+    for (const [canonical, entry] of remaining) {
+        matches.push(entry);
+        seen.add(canonical);
     }
 
     // Reuse Discord's GIF result scroller so its themed scrollbar and wheel
