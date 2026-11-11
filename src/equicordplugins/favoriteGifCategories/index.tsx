@@ -12,8 +12,14 @@ import { showToast, UserSettingsActionCreators } from "@webpack/common";
 type Category = { id: string; name: string };
 type CategoryData = { categories: Category[]; assignments: Record<string, string[]> };
 
-const PICKER_CARD = ".result__2dc39";
-const FAVORITE_BUTTON = '[aria-label="Remove from Favorites"]';
+// Discord hashes its class names per build, so keep the old explicit class as
+// a fallback and otherwise identify result cards by structure (role=button
+// containing media plus a favorite control).
+const LEGACY_PICKER_CARD = ".result__2dc39";
+const PICKER_CARD_PATTERN = '[class*="result_"], [role="button"], [role="gridcell"]';
+const FAVORITE_BUTTON = '[aria-label="Remove from Favorites"], [aria-label="Add to Favorites"]';
+const DOWNLOAD_BUTTON = '[aria-label="Download GIF"]';
+const CATEGORY_VIEW_MARK = "[data-fav-gif-category-view]";
 const HEADER_MARK = "[data-fav-gif-category-bar]";
 const FOLDER_ICON = "<svg aria-hidden=\"true\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><path d=\"M10 4H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H12l-2-2Z\"/></svg>";
 const BACKUP_FORMAT = "EquicordGifCategories";
@@ -62,11 +68,34 @@ function resultContent(results: HTMLElement): HTMLElement | null {
         || results.querySelector<HTMLElement>('[class*="content"], [role="grid"]');
 }
 
+function classNameOf(element: Element | null | undefined): string {
+    return element?.getAttribute("class") || "";
+}
+
 function favoriteControl(card: Element): HTMLElement | null {
     const exact = card.querySelector<HTMLElement>(FAVORITE_BUTTON);
     if (exact) return exact;
     return Array.from(card.querySelectorAll<HTMLElement>("[aria-label]"))
-        .find(button => /remove.*favorite/i.test(button.getAttribute("aria-label") || "")) || null;
+        .find(button => /favorite/i.test(button.getAttribute("aria-label") || "")) || null;
+}
+
+function isPickerCard(element: Element | null | undefined): element is HTMLElement {
+    if (!(element instanceof HTMLElement)) return false;
+    if (element.closest(CATEGORY_VIEW_MARK)) return false;
+    if (!element.querySelector("img, video")) return false;
+    return !!favoriteControl(element);
+}
+
+/** Locate Discords GIF result cards regardless of the current hashed classes. */
+function pickerCards(root: ParentNode = document): HTMLElement[] {
+    const legacy = Array.from(root.querySelectorAll<HTMLElement>(LEGACY_PICKER_CARD))
+        .filter(card => !card.closest(CATEGORY_VIEW_MARK));
+    if (legacy.length) return legacy;
+
+    const candidates = Array.from(root.querySelectorAll<HTMLElement>(PICKER_CARD_PATTERN)).filter(isPickerCard);
+    // Nested wrappers can also satisfy the structural test; keep the innermost
+    // card so one result is not counted twice.
+    return candidates.filter(card => !candidates.some(other => other !== card && card.contains(other)));
 }
 
 const settings = definePluginSettings({
@@ -339,6 +368,9 @@ function cardMediaUrl(card: Element): string | null {
 }
 
 function cardKey(card: Element, cards: Element[]): string | null {
+    const stored = (card as HTMLElement).dataset?.favGifKey;
+    if (stored) return stored;
+
     const direct = cardMediaUrl(card);
     if (direct) return canonicalKey(direct);
 
@@ -352,13 +384,26 @@ function nativeResultCards(): HTMLElement[] {
     const results = resultContainers()[0];
     const content = results && resultContent(results);
     const layer = content?.firstElementChild;
-    if (layer) {
-        const legacyCards = Array.from(layer.querySelectorAll<HTMLElement>(PICKER_CARD));
-        if (legacyCards.length) return legacyCards;
-        return Array.from(layer.querySelectorAll<HTMLElement>("[role='button'], [class*='result']"))
-            .filter(card => card.querySelector("img, video") && favoriteControl(card));
-    }
-    return [];
+    if (!layer) return [];
+    return pickerCards(layer);
+}
+
+/**
+ * Read the current build's hashed classes from a real card so synthetic
+ * category tiles use exactly the same styling as native results.
+ */
+function pickerClasses() {
+    const native = nativeResultCards()[0];
+    const media = native?.querySelector<HTMLElement>("img, video");
+    const favorite = native ? favoriteControl(native) : null;
+    const download = native?.querySelector<HTMLElement>(DOWNLOAD_BUTTON);
+    return {
+        card: classNameOf(native).trim() || LEGACY_PICKER_CARD,
+        media: classNameOf(media).trim() || "gif__2dc39",
+        favorite: classNameOf(favorite).trim() || "favButton__2dc39 gifFavoriteButton__43deb selected__43deb",
+        download: classNameOf(download || favorite).split(/\s+/).filter(name => name && !/^selected/i.test(name)).join(" ") || "favButton__2dc39 gifFavoriteButton__43deb",
+        icon: classNameOf(favorite?.querySelector("svg")).trim() || classNameOf(download?.querySelector("svg")).trim() || "icon__43deb"
+    };
 }
 
 function selectCategoryGif(item: { src: string; format: number; width: number; height: number; key: string; }) {
@@ -374,7 +419,24 @@ function selectCategoryGif(item: { src: string; format: number; width: number; h
     void activateNativeResult(item.key);
 }
 
-async function activateNativeResult(key: string, targetSelector = PICKER_CARD) {
+function downloadCategoryGif(item: { src: string; key: string; }) {
+    // The GIF Downloader plugin exposes its exact resolution/conversion path.
+    // Use it directly so downloading a category tile cannot depend on first
+    // scrolling Discord's virtualized favorites list to the matching card.
+    const tools = (window as any).__favGifTools;
+    if (typeof tools?.saveGifFile === "function") {
+        Promise.resolve(tools.saveGifFile(`${Date.now()}`, item.src))
+            .then(() => showToast({ text: "GIF saved", variant: "success" } as any))
+            .catch((error: unknown) => {
+                console.error("[FavoriteGifCategories] Download failed", error);
+                showToast({ text: `GIF download failed: ${String(error)}`, variant: "critical" } as any);
+            });
+        return;
+    }
+    void activateNativeResult(item.key, DOWNLOAD_BUTTON);
+}
+
+async function activateNativeResult(key: string, targetSelector: string | null = null) {
     const results = resultContainers()[0];
     const contentEl = results && resultContent(results);
     const virtualLayer = contentEl?.firstElementChild as HTMLElement | null;
@@ -388,20 +450,30 @@ async function activateNativeResult(key: string, targetSelector = PICKER_CARD) {
         virtualLayer.style.height = contentEl.dataset.favGifVirtualHeight || virtualLayer.style.height;
         virtualLayer.style.overflow = "visible";
         virtualLayer.style.visibility = "";
+
         const index = favoriteKeysInOrder().indexOf(key);
-        results.scrollTop = Math.max(0, Math.floor(Math.max(0, index) / 2) * 272);
-        results.dispatchEvent(new Event("scroll"));
-        await new Promise(resolve => setTimeout(resolve, 350));
-        const legacyCards = Array.from(virtualLayer.querySelectorAll<HTMLElement>(PICKER_CARD));
-        const cards = legacyCards.length ? legacyCards : Array.from(virtualLayer.querySelectorAll<HTMLElement>("[role='button'], [class*='result']"))
-            .filter(card => card.querySelector("img, video") && favoriteControl(card));
-        const native = cards.find(candidate => cardKey(candidate, cards) === key);
-        const target = targetSelector === FAVORITE_BUTTON
-            ? (native && favoriteControl(native))
-            : native?.querySelector<HTMLElement>(targetSelector) ?? (targetSelector === PICKER_CARD ? native : null);
-        if (!target) return false;
-        target.click();
-        return true;
+        // Rows are two cards wide with uneven heights, so the exact scroll
+        // offset cannot be computed. Probe around the estimated row and stop
+        // at the first mounted card whose media matches.
+        const estimatedRow = Math.floor(Math.max(0, index) / 2);
+        const rows = [0, -1, 1, -2, 2, -3, 3].map(offset => Math.max(0, estimatedRow + offset));
+        for (const row of rows) {
+            results.scrollTop = row * 272;
+            results.dispatchEvent(new Event("scroll"));
+            await new Promise(resolve => setTimeout(resolve, 300));
+            const cards = pickerCards(virtualLayer);
+            const native = cards.find(candidate => cardKey(candidate, cards) === key);
+            if (!native) continue;
+
+            const target = targetSelector === FAVORITE_BUTTON
+                ? favoriteControl(native)
+                : targetSelector ? native.querySelector<HTMLElement>(targetSelector) : native;
+            if (target) {
+                target.click();
+                return true;
+            }
+        }
+        return false;
     } finally {
         contentEl.style.height = oldHeight;
         virtualLayer.style.height = "1px";
@@ -869,10 +941,13 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
     }
 
     const listHeight = Math.max(1, Math.ceil(matches.length / 2)) * 272 + 24;
-    contentEl.style.height = `${listHeight}px`;
-    view.style.cssText = "position:absolute;left:0;right:0;top:12px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:261px;align-content:start;gap:10px;padding:0 12px 12px;box-sizing:border-box;";
+    view.style.cssText = "position:absolute;left:0;right:0;top:0;";
     const renderKey = JSON.stringify({ categoryId, matches: matches.map(m => [m.key, m.src]) });
-    if (view.dataset.renderKey === renderKey && view.childElementCount > 0) return;
+    if (view.dataset.renderKey === renderKey && view.childElementCount > 0) {
+        contentEl.style.height = view.dataset.contentHeight || `${listHeight}px`;
+        return;
+    }
+    contentEl.style.height = `${listHeight}px`;
     view.dataset.renderKey = renderKey;
     view.replaceChildren();
 
@@ -885,16 +960,24 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
     }
 
     (view as any)._columnTops = [0, 0];
-    const colWidth = Math.max(80, (results.clientWidth - 36) / 2);
+    const classes = pickerClasses();
+    const templateFavorite = results.querySelector<HTMLElement>(FAVORITE_BUTTON);
+    const templateDownload = results.querySelector<HTMLElement>(DOWNLOAD_BUTTON);
+    const downloadSvg = `<svg class="${classes.icon}" aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    const colWidth = (() => {
+        const native = nativeResultCards()[0]?.getBoundingClientRect().width;
+        return Math.max(80, native && native > 0 ? native : (results.clientWidth - 36) / 2);
+    })();
     const columns = [12, 24 + colWidth];
     const columnTops = [0, 0];
     for (const item of matches) {
         const card = document.createElement("div");
-        card.className = "result__2dc39";
+        card.className = classes.card;
         card.title = item.key;
-        card.setAttribute("aria-label", "file");
+        card.setAttribute("aria-label", "GIF");
         card.setAttribute("role", "button");
         card.tabIndex = -1;
+        card.dataset.favGifKey = item.key;
 
         const ratio = item.width > 0 && item.height > 0 ? item.height / item.width : 1.125;
         const cardHeight = Math.max(80, Math.min(520, colWidth * ratio));
@@ -905,7 +988,7 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
         const rawSrc = item.src;
         const video = item.format === 2 || /\.(mp4|webm)(?:\?|$)/i.test(rawSrc);
         const media = video ? document.createElement("video") : document.createElement("img");
-        media.className = "gif__2dc39";
+        media.className = classes.media;
         media.setAttribute("aria-label", "GIF");
         media.style.cssText = "display:block;width:100%;height:100%;object-fit:cover;";
         if (video) {
@@ -923,24 +1006,28 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
         }
         card.append(media);
 
-        const nativeFavorite = results.querySelector<HTMLElement>(FAVORITE_BUTTON);
-        const favorite = nativeFavorite?.cloneNode(true) as HTMLElement || document.createElement("div");
-        favorite.className = "favButton__2dc39 gifFavoriteButton__43deb selected__43deb";
+        const favorite = templateFavorite?.cloneNode(true) as HTMLElement || document.createElement("div");
+        favorite.className = templateFavorite ? classNameOf(templateFavorite) : classes.favorite;
         favorite.setAttribute("aria-label", "Remove from Favorites");
+        favorite.setAttribute("title", "Remove from Favorites");
+        favorite.removeAttribute("aria-describedby");
         favorite.setAttribute("role", "button");
         favorite.tabIndex = 0;
         favorite.style.cssText = "position:absolute;top:4px;right:4px;z-index:2;";
-        if (!favorite.querySelector("svg")) favorite.innerHTML = "<svg class=\"icon__43deb\" aria-hidden=\"true\" width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><path d=\"M10.81 2.86c.38-1.15 2-1.15 2.38 0l1.89 5.83h6.12c1.2 0 1.71 1.54.73 2.25l-4.95 3.6 1.9 5.82a1.25 1.25 0 0 1-1.93 1.4L12 18.16l-4.95 3.6c-.98.7-2.3-.25-1.92-1.4l1.89-5.82-4.95-3.6a1.25 1.25 0 0 1 .73-2.25h6.12l1.9-5.83Z\"/></svg>";
+        if (!favorite.querySelector("svg")) favorite.innerHTML = `<svg class="${classes.icon}" aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M10.81 2.86c.38-1.15 2-1.15 2.38 0l1.89 5.83h6.12c1.2 0 1.71 1.54.73 2.25l-4.95 3.6 1.9 5.82a1.25 1.25 0 0 1-1.93 1.4L12 18.16l-4.95 3.6c-.98.7-2.3-.25-1.92-1.4l1.89-5.82-4.95-3.6a1.25 1.25 0 0 1 .73-2.25h6.12l1.9-5.83Z"/></svg>`;
 
-        const nativeDownload = results.querySelector<HTMLElement>('[aria-label="Download GIF"]');
-        const download = nativeDownload?.cloneNode(true) as HTMLElement || favorite.cloneNode(true) as HTMLElement;
-        download.className = "favButton__2dc39 gifFavoriteButton__43deb";
+        const download = templateDownload?.cloneNode(true) as HTMLElement || favorite.cloneNode(true) as HTMLElement;
+        download.className = classes.download;
         download.setAttribute("aria-label", "Download GIF");
+        download.setAttribute("title", "Download GIF");
+        download.removeAttribute("aria-describedby");
         download.setAttribute("role", "button");
         download.tabIndex = 0;
+        download.dataset.favGifDownload = "true";
         download.style.cssText = "position:absolute;top:4px;right:40px;z-index:2;";
         const downloadIcon = download.querySelector("svg");
-        if (downloadIcon) downloadIcon.outerHTML = "<svg class=\"icon__43deb\" aria-hidden=\"true\" width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\"><path d=\"M12 3v12m0 0 4-4m-4 4-4-4M5 21h14\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>";
+        if (downloadIcon) downloadIcon.outerHTML = downloadSvg;
+        else download.insertAdjacentHTML("afterbegin", downloadSvg);
 
         card.addEventListener("click", event => {
             if (event.target === favorite || event.target === download || favorite.contains(event.target as Node) || download.contains(event.target as Node)) return;
@@ -953,17 +1040,21 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
             event.stopPropagation();
             selectCategoryGif(item);
         });
-        const forwardControl = (control: HTMLElement, selector: string) => control.addEventListener("click", event => {
+        favorite.addEventListener("click", event => {
             event.preventDefault();
             event.stopPropagation();
-            void activateNativeResult(item.key, selector);
+            void activateNativeResult(item.key, FAVORITE_BUTTON);
         });
-        forwardControl(favorite, FAVORITE_BUTTON);
-        forwardControl(download, '[aria-label="Download GIF"]');
+        download.addEventListener("click", event => {
+            event.preventDefault();
+            event.stopPropagation();
+            downloadCategoryGif(item);
+        });
         card.append(download, favorite);
         view.append(card);
     }
     contentEl.style.height = `${Math.max(columnTops[0], columnTops[1]) + 12}px`;
+    view.dataset.contentHeight = contentEl.style.height;
 }
 
 function processCards() {
@@ -977,29 +1068,38 @@ function processCards() {
     // search or a hidden back/navigation flow.
     if (!inFavorites) {
         selectedCategory = null;
-        for (const card of cards) (card as HTMLElement).style.display = "";
         restoreCategoryView();
-        resultContainers().forEach(results => { results.style.display = ""; });
+        clearTemporaryHides(cards);
         return;
     }
 
     const data = loadData();
 
     if (selectedCategory) {
-        for (const card of cards) (card as HTMLElement).style.display = "none";
         renderCategoryView(document.body, selectedCategory, data);
         return;
     }
 
     restoreCategoryView();
-    resultContainers().forEach(results => { results.style.display = ""; });
+    clearTemporaryHides(cards);
 
     for (const card of cards) {
         const key = cardKey(card, cards);
-        const isInCategory = !!key && (data.assignments[key] || []).includes(selectedCategory || "");
-        const hasCategory = !!selectedCategory && isInCategory;
-        (card as HTMLElement).style.display = !selectedCategory || hasCategory ? "" : "none";
         (card as HTMLElement).dataset.favGifCategoryKey = key || "";
+    }
+}
+
+/**
+ * Earlier versions forced display:"" on every native card, which un-hid cards
+ * Discord's virtualizer had deliberately hidden. Those cards are absolutely
+ * positioned, so un-hiding them stacks GIFs on top of each other. Only undo
+ * hides this plugin actually applied.
+ */
+function clearTemporaryHides(cards: HTMLElement[]) {
+    for (const card of cards) {
+        if (card.dataset.favGifHidden !== "true") continue;
+        card.style.display = "";
+        delete card.dataset.favGifHidden;
     }
 }
 
@@ -1023,13 +1123,24 @@ function restoreCategoryView() {
     });
 }
 
+function closestPickerCard(target: Element): HTMLElement | null {
+    const synthetic = target.closest<HTMLElement>("[data-fav-gif-key]");
+    if (synthetic) return synthetic;
+
+    const card = nativeResultCards().find(candidate => candidate.contains(target));
+    if (card) return card;
+
+    // Fallback for the very first context menu before a scan has run.
+    const candidate = target.closest<HTMLElement>(PICKER_CARD_PATTERN);
+    return candidate && isPickerCard(candidate) ? candidate : null;
+}
+
 function onContextMenu(event: MouseEvent) {
     const target = event.target as Element | null;
     if (!target) return;
-    const card = target.closest(PICKER_CARD) || target.closest("[role='button'], [class*='result']");
-    if (!card || !favoriteControl(card)) return;
-    const cards = nativeResultCards();
-    showContextMenu(event, card, cards);
+    const card = closestPickerCard(target);
+    if (!card) return;
+    showContextMenu(event, card, nativeResultCards());
 }
 
 function scan() {
@@ -1083,8 +1194,9 @@ export default definePlugin({
         closeMenu();
         closeDialog();
         document.querySelectorAll(HEADER_MARK).forEach(el => el.remove());
-        document.querySelectorAll<HTMLElement>(PICKER_CARD).forEach(card => {
-            card.style.display = "";
+        restoreCategoryView();
+        clearTemporaryHides(pickerCards(document));
+        document.querySelectorAll<HTMLElement>("[data-fav-gif-category-key]").forEach(card => {
             delete card.dataset.favGifCategoryKey;
         });
         selectedCategory = null;

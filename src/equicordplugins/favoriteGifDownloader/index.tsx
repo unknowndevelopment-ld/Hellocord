@@ -14,6 +14,9 @@ const Native = VencordNative.pluginHelpers["GIF Downloader"] as PluginNative<typ
 
 const DOWNLOAD_ICON = "<svg class=\"icon__43deb\" aria-hidden=\"true\" role=\"img\" xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" fill=\"none\" viewBox=\"0 0 24 24\"><path fill=\"currentColor\" d=\"M12 3v12m0 0 4-4m-4 4-4-4M5 21h14\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>";
 
+/** Matches the result cards star controls only, not "Search Favorites". */
+const FAVORITE_LABEL = /^(?:add|remove)\b.*\bfavorites?$/i;
+
 let downloadCounter = 1;
 
 function getFavoriteGifUrls(): string[] {
@@ -339,29 +342,37 @@ async function bulkDownload() {
 /**
  * Find the media (img or video) associated with a favorite button without
  * climbing too far up (which could grab an unrelated image such as a server
- * icon). Tenor/klipy favorites render as <video>.
+ * icon). Tenor/klipy favorites render as <video> or an animated webp <img>.
  */
+function mediaUrlIn(container: Element): string | null {
+    const video = container.querySelector("video");
+    if (video) {
+        const src = video.currentSrc || video.src;
+        if (src && !src.startsWith("data:") && !src.startsWith("blob:")) return src;
+    }
+    const img = container.querySelector("img");
+    if (img) {
+        const src = img.currentSrc || img.src;
+        if (src && !src.startsWith("data:") && !src.startsWith("blob:")) return src;
+        const srcset = img.getAttribute("srcset");
+        const first = srcset?.split(",")[0]?.trim().split(/\s+/)[0];
+        if (first) return first;
+    }
+    return null;
+}
+
 function findGifMediaUrl(btn: Element): string | null {
-    const selectors = [
-        '[class*="imageContainer"]',
-        '[class*="imageWrapper"]',
-        '[class*="result"]',
-        '[class*="media"]',
-        '[class*="embed"]',
-    ];
-    const containers: Element[] = [];
+    // Prefer the result card itself. Discord hashes the class per build, so
+    // match the stable "result_" prefix and fall back to ancestor walking.
+    const card = btn.closest('[class*="result_"]');
+    if (card) {
+        const src = mediaUrlIn(card);
+        if (src) return src;
+    }
+
     for (let parent = btn.parentElement, depth = 0; parent && depth < 8; parent = parent.parentElement, depth++) {
-        if (parent.querySelector("img, video")) containers.push(parent);
-    }
-    for (const sel of selectors) {
-        const c = btn.closest(sel);
-        if (c && !containers.includes(c)) containers.push(c);
-    }
-    for (const c of containers) {
-        const video = c.querySelector("video");
-        if (video && video.src) return video.src;
-        const img = c.querySelector("img");
-        if (img && img.src) return img.src;
+        const src = mediaUrlIn(parent);
+        if (src) return src;
     }
     return null;
 }
@@ -372,8 +383,14 @@ function processSingleButtons(root: ParentNode | null) {
     // be the node that was added (and would not be found by querySelectorAll).
     const favButtons: Element[] = [];
     if (root instanceof Element && root.matches('[aria-label*="Favorite"]')) favButtons.push(root);
-    favButtons.push(...root.querySelectorAll<HTMLElement>("[aria-label*=\"Favorite\"]"));
-    const candidates = favButtons.filter(button => /remove.*favorite/i.test(button.getAttribute("aria-label") || ""));
+    favButtons.push(...root.querySelectorAll<HTMLElement>('[aria-label*="Favorite"]'));
+    // Non-favorited results say "Add to Favorites"; favorited ones say
+    // "Remove from Favorites". Both are valid download targets. Match the
+    // label shape exactly so the "Search Favorites" input is never cloned.
+    const candidates = favButtons.filter(button =>
+        !button.closest("[data-fav-gif-category-view]") &&
+        FAVORITE_LABEL.test((button.getAttribute("aria-label") || "").trim())
+    );
     candidates.forEach(favBtn => {
         if (favBtn.parentElement?.querySelector("[data-fav-gif-download]")) return;
 
@@ -382,7 +399,11 @@ function processSingleButtons(root: ParentNode | null) {
 
         try {
             const dlBtn = favBtn.cloneNode(true) as HTMLElement;
+            // Defensive: never duplicate form controls into the picker header.
+            if (dlBtn instanceof HTMLInputElement || dlBtn.getAttribute("role") === "searchbox") return;
             dlBtn.setAttribute("aria-label", "Download GIF");
+            dlBtn.setAttribute("title", "Download GIF");
+            dlBtn.removeAttribute("aria-describedby");
             dlBtn.dataset.favGifDownload = "true";
             dlBtn.className = dlBtn.className
                 .split(/\s+/)
@@ -399,6 +420,8 @@ function processSingleButtons(root: ParentNode | null) {
                 (dlBtn as HTMLElement).style.top = computed.top;
                 const right = (parseInt(computed.right, 10) || 0) + (favBtn as HTMLElement).offsetWidth + 4;
                 (dlBtn as HTMLElement).style.right = `${right}px`;
+            } else {
+                (dlBtn as HTMLElement).style.marginLeft = "4px";
             }
 
             dlBtn.addEventListener("click", e => {
@@ -437,15 +460,12 @@ function processBulkButton(root: ParentNode | null) {
 
         const btn = document.createElement("button");
         btn.setAttribute("data-fav-bulk", "true");
+        btn.type = "button";
         btn.textContent = "Bulk Download";
-        btn.style.marginLeft = "8px";
-        btn.style.padding = "4px 8px";
-        btn.style.borderRadius = "4px";
-        btn.style.border = "none";
-        btn.style.background = "var(--brand-experiment, #5865f2)";
-        btn.style.color = "white";
-        btn.style.cursor = "pointer";
-        btn.style.fontSize = "12px";
+        btn.title = "Download favorite GIFs";
+        // The header is a flex row; without an explicit basis and nowrap the
+        // label wraps to "Bulk / Downloa" and gets clipped at narrow widths.
+        btn.style.cssText = "flex:0 0 auto;align-self:center;white-space:nowrap;margin-left:8px;padding:0 10px;height:32px;min-width:max-content;box-sizing:border-box;border-radius:4px;border:none;background:var(--brand-experiment,#5865f2);color:#fff;font:600 12px/32px var(--font-primary,sans-serif);cursor:pointer;";
         btn.addEventListener("click", () => {
             void bulkDownload();
         });
@@ -493,6 +513,9 @@ export default definePlugin({
         };
 
         processRoot(document);
+        // Older builds could mistake the "Search Favorites" input for a star
+        // control; drop any such clone left behind in the picker header.
+        document.querySelectorAll<HTMLInputElement>("input[data-fav-gif-download]").forEach(node => node.remove());
         observer = new MutationObserver(mutations => {
             for (const mutation of mutations) {
                 mutation.addedNodes.forEach(node => {

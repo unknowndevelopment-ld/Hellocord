@@ -5,7 +5,7 @@
  */
 
 import { app, dialog, net } from "electron";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { access, mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
 
 const DIR_NAME = "GIFS";
@@ -77,8 +77,23 @@ function detectExtension(data: Uint8Array, fallback: string) {
 }
 
 async function writeTo(dir: string, name: string, data: Uint8Array) {
-    const safe = safeName(name);
-    const filePath = join(dir, safe || "download.gif");
+    const safe = safeName(name) || "download.gif";
+    const dot = safe.lastIndexOf(".");
+    const base = dot > 0 ? safe.slice(0, dot) : safe;
+    const extension = dot > 0 ? safe.slice(dot) : "";
+
+    // Never clobber an earlier download. The renderer's counter restarts each
+    // session, so "1.gif" can already exist from a previous run.
+    let filePath = join(dir, safe);
+    for (let index = 1; ; index++) {
+        try {
+            await access(filePath);
+        } catch {
+            break;
+        }
+        filePath = join(dir, `${base} (${index})${extension}`);
+    }
+
     await writeFile(filePath, data);
     return filePath;
 }
