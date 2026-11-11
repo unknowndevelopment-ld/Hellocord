@@ -34,6 +34,41 @@ let suppressCategoryClick = false;
 let categoryActivationInProgress = false;
 let nativeGifSelector: ((gif: { url: string; [key: string]: any; }) => void) | null = null;
 
+function favoriteSearchInputs(root: ParentNode = document): HTMLInputElement[] {
+    const candidates = Array.from(root.querySelectorAll<HTMLInputElement>("input"));
+    return candidates.filter(input => {
+        if (input.type !== "search" && !/favorite/i.test(`${input.placeholder} ${input.getAttribute("aria-label") || ""}`)) return false;
+        let node: HTMLElement | null = input;
+        for (let i = 0; i < 5 && node; i++, node = node.parentElement) {
+            if (/favoritesHeader/i.test(typeof node.className === "string" ? node.className : "")) return true;
+        }
+        return /favorite/i.test(`${input.placeholder} ${input.getAttribute("aria-label") || ""}`);
+    });
+}
+
+function isFavoritesView(): boolean {
+    return favoriteSearchInputs().length > 0;
+}
+
+function resultContainers(root: ParentNode = document): HTMLElement[] {
+    const exact = Array.from(root.querySelectorAll<HTMLElement>('[class*="results__2dc39"]'));
+    if (exact.length) return exact;
+    return Array.from(root.querySelectorAll<HTMLElement>("[class*='results'], [role='grid']"))
+        .filter(element => element.querySelector('[aria-label*="Favorites"], img, video'));
+}
+
+function resultContent(results: HTMLElement): HTMLElement | null {
+    return results.querySelector<HTMLElement>('[class*="content__99f8c"]')
+        || results.querySelector<HTMLElement>('[class*="content"], [role="grid"]');
+}
+
+function favoriteControl(card: Element): HTMLElement | null {
+    const exact = card.querySelector<HTMLElement>(FAVORITE_BUTTON);
+    if (exact) return exact;
+    return Array.from(card.querySelectorAll<HTMLElement>("[aria-label]"))
+        .find(button => /remove.*favorite/i.test(button.getAttribute("aria-label") || "")) || null;
+}
+
 const settings = definePluginSettings({
     data: {
         type: OptionType.STRING,
@@ -314,10 +349,16 @@ function cardKey(card: Element, cards: Element[]): string | null {
 }
 
 function nativeResultCards(): HTMLElement[] {
-    const results = document.querySelector<HTMLElement>('[class*="results__2dc39"]');
-    const content = results?.querySelector<HTMLElement>('[class*="content__99f8c"]');
+    const results = resultContainers()[0];
+    const content = results && resultContent(results);
     const layer = content?.firstElementChild;
-    return layer ? Array.from(layer.querySelectorAll<HTMLElement>(PICKER_CARD)) : [];
+    if (layer) {
+        const legacyCards = Array.from(layer.querySelectorAll<HTMLElement>(PICKER_CARD));
+        if (legacyCards.length) return legacyCards;
+        return Array.from(layer.querySelectorAll<HTMLElement>("[role='button'], [class*='result']"))
+            .filter(card => card.querySelector("img, video") && favoriteControl(card));
+    }
+    return [];
 }
 
 function selectCategoryGif(item: { src: string; format: number; width: number; height: number; key: string; }) {
@@ -334,8 +375,8 @@ function selectCategoryGif(item: { src: string; format: number; width: number; h
 }
 
 async function activateNativeResult(key: string, targetSelector = PICKER_CARD) {
-    const results = document.querySelector<HTMLElement>('[class*="results__2dc39"]');
-    const contentEl = results?.querySelector<HTMLElement>('[class*="content__99f8c"]');
+    const results = resultContainers()[0];
+    const contentEl = results && resultContent(results);
     const virtualLayer = contentEl?.firstElementChild as HTMLElement | null;
     if (!results || !contentEl || !virtualLayer || categoryActivationInProgress) return false;
 
@@ -351,9 +392,13 @@ async function activateNativeResult(key: string, targetSelector = PICKER_CARD) {
         results.scrollTop = Math.max(0, Math.floor(Math.max(0, index) / 2) * 272);
         results.dispatchEvent(new Event("scroll"));
         await new Promise(resolve => setTimeout(resolve, 350));
-        const cards = Array.from(virtualLayer.querySelectorAll<HTMLElement>(PICKER_CARD));
+        const legacyCards = Array.from(virtualLayer.querySelectorAll<HTMLElement>(PICKER_CARD));
+        const cards = legacyCards.length ? legacyCards : Array.from(virtualLayer.querySelectorAll<HTMLElement>("[role='button'], [class*='result']"))
+            .filter(card => card.querySelector("img, video") && favoriteControl(card));
         const native = cards.find(candidate => cardKey(candidate, cards) === key);
-        const target = native?.querySelector<HTMLElement>(targetSelector) ?? (targetSelector === PICKER_CARD ? native : null);
+        const target = targetSelector === FAVORITE_BUTTON
+            ? (native && favoriteControl(native))
+            : native?.querySelector<HTMLElement>(targetSelector) ?? (targetSelector === PICKER_CARD ? native : null);
         if (!target) return false;
         target.click();
         return true;
@@ -668,7 +713,7 @@ function migrateLegacySettings() {
 }
 
 function renderCategoryBar() {
-    const input = document.querySelector<HTMLInputElement>('input[placeholder="Search Favorites"]');
+    const input = favoriteSearchInputs()[0];
     if (!input) return;
 
     // React may replace the favorites header while leaving the injected bar
@@ -682,6 +727,7 @@ function renderCategoryBar() {
 
     let header: HTMLElement | null = input.parentElement;
     while (header && !/favoritesHeader/i.test(header.className || "")) header = header.parentElement;
+    if (!header) header = input.parentElement;
     if (!header) return;
 
     const bar = existingBar || document.createElement("div");
@@ -778,7 +824,8 @@ function renderCategoryBar() {
 
 function renderCategoryView(content: HTMLElement, categoryId: string, data: CategoryData) {
     const results = content.querySelector<HTMLElement>('[class*="results__2dc39"]')
-        || document.querySelector<HTMLElement>('[class*="results__2dc39"]');
+        || resultContainers(content)[0]
+        || resultContainers()[0];
     if (!results) return;
 
     const matches: Array<{ key: string; src: string; format: number; width: number; height: number }> = [];
@@ -803,7 +850,7 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
     // handling stay native. Keep the virtualizer mounted (but invisible) so
     // clicks can be forwarded to the real Discord result when it is mounted.
     results.style.display = "";
-    const contentEl = results.querySelector<HTMLElement>('[class*="content__99f8c"]');
+    const contentEl = resultContent(results);
     if (!contentEl) return;
     const virtualLayer = contentEl.firstElementChild as HTMLElement | null;
     if (virtualLayer) {
@@ -922,7 +969,7 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
 function processCards() {
     if (categoryActivationInProgress) return;
     const cards = nativeResultCards();
-    const inFavorites = !!document.querySelector('input[placeholder="Search Favorites"]');
+    const inFavorites = isFavoritesView();
 
     // The same result-card class is used by normal GIF search. Never apply a
     // saved-favorites category filter outside the Favorites page, and reset
@@ -932,7 +979,7 @@ function processCards() {
         selectedCategory = null;
         for (const card of cards) (card as HTMLElement).style.display = "";
         restoreCategoryView();
-        document.querySelectorAll<HTMLElement>('[class*="results__2dc39"]').forEach(results => { results.style.display = ""; });
+        resultContainers().forEach(results => { results.style.display = ""; });
         return;
     }
 
@@ -945,7 +992,7 @@ function processCards() {
     }
 
     restoreCategoryView();
-    document.querySelectorAll<HTMLElement>('[class*="results__2dc39"]').forEach(results => { results.style.display = ""; });
+    resultContainers().forEach(results => { results.style.display = ""; });
 
     for (const card of cards) {
         const key = cardKey(card, cards);
@@ -979,8 +1026,8 @@ function restoreCategoryView() {
 function onContextMenu(event: MouseEvent) {
     const target = event.target as Element | null;
     if (!target) return;
-    const card = target.closest(PICKER_CARD);
-    if (!card || !card.querySelector(FAVORITE_BUTTON)) return;
+    const card = target.closest(PICKER_CARD) || target.closest("[role='button'], [class*='result']");
+    if (!card || !favoriteControl(card)) return;
     const cards = nativeResultCards();
     showContextMenu(event, card, cards);
 }

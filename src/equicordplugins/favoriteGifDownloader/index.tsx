@@ -350,16 +350,13 @@ function findGifMediaUrl(btn: Element): string | null {
         '[class*="embed"]',
     ];
     const containers: Element[] = [];
+    for (let parent = btn.parentElement, depth = 0; parent && depth < 8; parent = parent.parentElement, depth++) {
+        if (parent.querySelector("img, video")) containers.push(parent);
+    }
     for (const sel of selectors) {
         const c = btn.closest(sel);
-        if (c) containers.push(c);
+        if (c && !containers.includes(c)) containers.push(c);
     }
-    let container: HTMLElement | null = btn.parentElement;
-    for (let i = 0; i < 5 && container; i++) {
-        containers.push(container);
-        container = container.parentElement;
-    }
-
     for (const c of containers) {
         const video = c.querySelector("video");
         if (video && video.src) return video.src;
@@ -374,12 +371,11 @@ function processSingleButtons(root: ParentNode | null) {
     // React recycles and re-creates picker nodes, so the star button itself can
     // be the node that was added (and would not be found by querySelectorAll).
     const favButtons: Element[] = [];
-    if (root instanceof Element && root.matches('[aria-label="Remove from Favorites"]')) favButtons.push(root);
-    favButtons.push(...root.querySelectorAll('[aria-label="Remove from Favorites"]'));
-    favButtons.forEach(favBtn => {
-        const result = favBtn.parentElement;
-        if (!result) return;
-        if (result.querySelector('[aria-label="Download GIF"]')) return;
+    if (root instanceof Element && root.matches('[aria-label*="Favorite"]')) favButtons.push(root);
+    favButtons.push(...root.querySelectorAll<HTMLElement>("[aria-label*=\"Favorite\"]"));
+    const candidates = favButtons.filter(button => /remove.*favorite/i.test(button.getAttribute("aria-label") || ""));
+    candidates.forEach(favBtn => {
+        if (favBtn.parentElement?.querySelector("[data-fav-gif-download]")) return;
 
         const mediaUrl = findGifMediaUrl(favBtn as Element);
         if (!mediaUrl) return;
@@ -387,6 +383,7 @@ function processSingleButtons(root: ParentNode | null) {
         try {
             const dlBtn = favBtn.cloneNode(true) as HTMLElement;
             dlBtn.setAttribute("aria-label", "Download GIF");
+            dlBtn.dataset.favGifDownload = "true";
             dlBtn.className = dlBtn.className
                 .split(/\s+/)
                 .filter(c => !/selected/i.test(c))
@@ -422,12 +419,20 @@ function processSingleButtons(root: ParentNode | null) {
 
 function processBulkButton(root: ParentNode | null) {
     if (!root || !root.querySelectorAll) return;
-    const inputs = root.querySelectorAll('input[placeholder="Search Favorites"]');
+    const inputs = Array.from(root.querySelectorAll<HTMLInputElement>("input")).filter(input => {
+        if (/favorite/i.test(`${input.placeholder} ${input.getAttribute("aria-label") || ""}`)) return true;
+        let parent: HTMLElement | null = input;
+        for (let i = 0; i < 5 && parent; i++, parent = parent.parentElement) {
+            if (/favoritesHeader/i.test(typeof parent.className === "string" ? parent.className : "")) return true;
+        }
+        return false;
+    });
     inputs.forEach(input => {
         let header: HTMLElement | null = input.parentElement;
-        while (header && !/favoritesHeader/i.test(header.className || "")) {
+        while (header && !/favoritesHeader/i.test(typeof header.className === "string" ? header.className : "")) {
             header = header.parentElement;
         }
+        if (!header) header = input.parentElement;
         if (!header || header.querySelector("[data-fav-bulk]")) return;
 
         const btn = document.createElement("button");
@@ -463,7 +468,7 @@ function scheduleScan() {
     scanTimer = window.setTimeout(() => {
         scanTimer = null;
         // Only relevant while the GIF picker/favorites view is on screen.
-        if (!document.querySelector('[aria-label="Remove from Favorites"], input[placeholder="Search Favorites"]')) return;
+        if (!document.querySelector('[aria-label*="Favorite"], input[type="search"], input[placeholder*="favorite" i]')) return;
         processRoot(document);
     }, 250);
 }
@@ -508,7 +513,7 @@ export default definePlugin({
             clearTimeout(scanTimer);
             scanTimer = null;
         }
-        document.querySelectorAll('[aria-label="Download GIF"]').forEach(n => n.remove());
+        document.querySelectorAll('[data-fav-gif-download], [aria-label="Download GIF"]').forEach(n => n.remove());
         document.querySelectorAll("[data-fav-bulk]").forEach(n => n.remove());
     },
 });
