@@ -514,6 +514,192 @@ async function activateNativeResult(key: string, targetSelector: string | null =
     }
 }
 
+/** Position of every favorite in the order Discord renders them in. */
+function favoriteIndexes() {
+    const entries = Object.entries(favoriteGifEntries())
+        .map(([key, gif]) => ({
+            key: canonicalKey(key),
+            src: canonicalKey(String((gif as any)?.src || "")),
+            order: Number((gif as any)?.order) || 0
+        }))
+        .sort((a, b) => b.order - a.order);
+
+    const byKey = new Map<string, number>();
+    const bySrc = new Map<string, number>();
+    entries.forEach((entry, index) => {
+        byKey.set(entry.key, index);
+        if (entry.src) bySrc.set(entry.src, index);
+    });
+    return { byKey, bySrc };
+}
+
+function cardFavoriteIndex(
+    card: Element,
+    indexes: { byKey: Map<string, number>; bySrc: Map<string, number>; }
+): number | null {
+    const media = canonicalKey(cardMediaUrl(card) || "");
+    if (!media) return null;
+    if (indexes.bySrc.has(media)) return indexes.bySrc.get(media)!;
+    return indexes.byKey.get(media) ?? null;
+}
+
+/** The jump targets the unfiltered All list, so drop a stale Favorites search. */
+function clearFavoriteSearch(): boolean {
+    const input = favoriteSearchInputs()[0];
+    if (!input?.value) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, "");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    return true;
+}
+
+/**
+ * Jump from a category tile to the same GIF in the All favorites list.
+ * Discord renders that list as a two-column masonry with measured heights, so
+ * there is no direct index-to-offset formula. Instead, scroll to an estimate,
+ * read the cards that are mounted, and interpolate until the target is found.
+ */
+async function jumpToInAll(key: string) {
+    const targetKey = canonicalKey(key);
+    const gifs = favoriteGifEntries();
+    const indexes = favoriteIndexes();
+
+    let media = "";
+    for (const [raw, gif] of Object.entries(gifs)) {
+        if (canonicalKey(raw) !== targetKey) continue;
+        media = canonicalKey(String((gif as any)?.src || ""));
+        break;
+    }
+
+    let target = indexes.byKey.get(targetKey);
+    if (target == null && media) target = indexes.bySrc.get(media);
+
+    selectedCategory = null;
+    restoreCategoryView();
+    clearTemporaryHides(nativeResultCards());
+    scheduleScan();
+    if (clearFavoriteSearch()) {
+        // Let the unfiltered list render before measuring offsets.
+        await new Promise(resolve => setTimeout(resolve, 350));
+    }
+    // Restoring the native layer can leave the virtualizer a frame behind, so
+    // wait until it has actually mounted cards again before measuring.
+    for (let attempt = 0; attempt < 15 && nativeResultCards().length < 2; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    const results = resultContainers()[0];
+    if (!results) return;
+    if (target == null) {
+        showToast({ text: "That GIF is no longer in your favorites", variant: "critical" } as any);
+        return;
+    }
+
+    const absoluteTop = (element: Element) =>
+        element.getBoundingClientRect().top - results.getBoundingClientRect().top + results.scrollTop;
+    const maxScroll = () => Math.max(0, results.scrollHeight - results.clientHeight);
+    const scrollTo = async (top: number) => {
+        results.scrollTop = Math.max(0, Math.min(maxScroll(), top));
+        results.dispatchEvent(new Event("scroll"));
+        await new Promise(resolve => setTimeout(resolve, 260));
+    };
+
+    const findCard = () => {
+        const cards = nativeResultCards();
+        const byIndex = cards.find(card => cardFavoriteIndex(card, indexes) === target);
+        if (byIndex) return byIndex;
+        if (!media) return null;
+        return cards.find(card => canonicalKey(cardMediaUrl(card) || "") === media) || null;
+    };
+    const samplesNow = () => nativeResultCards()
+        .map(element => {
+            const index = cardFavoriteIndex(element, indexes);
+            return index == null ? null : { index, top: absoluteTop(element) };
+        })
+        .filter((sample): sample is { index: number; top: number; } => !!sample)
+        .sort((a, b) => a.index - b.index);
+
+    const awaitCard = async () => {
+        let found = findCard();
+        for (let attempt = 0; attempt < 6 && !found; attempt++) {
+            // Discord mounts the masonry tiles a few frames after the scroll
+            // position changes, so give the target a moment to exist.
+            await new Promise(resolve => setTimeout(resolve, 100));
+            found = findCard();
+        }
+        return found;
+    };
+
+    let card = null as HTMLElement | null;
+    let guess = target * 137;
+    let direction = 1;
+    let slope = 137;
+    for (let attempt = 0; attempt < 7 && !card; attempt++) {
+        await scrollTo(guess);
+        card = await awaitCard();
+        if (card) break;
+
+        let samples = samplesNow();
+        if (samples.length < 2) {
+            // One extra beat in case the render landed after the scroll.
+            await new Promise(resolve => setTimeout(resolve, 200));
+            samples = samplesNow();
+        }
+        if (samples.length < 2) break;
+
+        const first = samples[0];
+        const last = samples[samples.length - 1];
+        const local = last.index === first.index ? slope : (last.top - first.top) / (last.index - first.index);
+        if (!Number.isFinite(local) || local < 40) break;
+        slope = local;
+        direction = target < first.index ? -1 : 1;
+        const next = first.top + (target - first.index) * slope - 12;
+        if (Math.abs(next - results.scrollTop) < 12) {
+            // The index says we are already at the target's offset but its tile
+            // is not mounted. Nudge around this position before giving up.
+            for (const delta of [240, -240, 480, -480, 720, -720]) {
+                await scrollTo(results.scrollTop + delta);
+                card = await awaitCard();
+                if (card) break;
+            }
+            break;
+        }
+        guess = next;
+    }
+
+    // Last resort: step toward the target one window at a time instead of
+    // jumping around, and stop as soon as the list stops moving.
+    for (let step = 0; step < 20 && !card; step++) {
+        const before = results.scrollTop;
+        await scrollTo(before + direction * Math.max(620, slope * 5));
+        if (Math.abs(results.scrollTop - before) < 1) break;
+        card = await awaitCard();
+    }
+
+    if (!card) {
+        showToast({ text: "Could not find that GIF in All favorites", variant: "critical" } as any);
+        return;
+    }
+
+    await scrollTo(absoluteTop(card) - 12);
+    card = (await awaitCard()) || card;
+    // Positions can shift while the virtualizer settles, so line the tile up
+    // one more time if the first pass was off.
+    const relativeTop = card.getBoundingClientRect().top - results.getBoundingClientRect().top;
+    if (relativeTop < -4 || relativeTop > 30) {
+        await scrollTo(absoluteTop(card) - 12);
+        card = (await awaitCard()) || card;
+    }
+    const previousOutline = card.style.outline;
+    const previousOffset = card.style.outlineOffset;
+    card.style.outline = "3px solid var(--brand-experiment,#5865f2)";
+    card.style.outlineOffset = "2px";
+    setTimeout(() => {
+        card.style.outline = previousOutline;
+        card.style.outlineOffset = previousOffset;
+    }, 2600);
+}
+
 function closeMenu() {
     currentMenu?.remove();
     currentMenu = null;
@@ -752,6 +938,18 @@ function showContextMenu(event: MouseEvent, card: Element, cards: Element[]) {
         });
     }));
 
+    // Only meaningful inside a category: leave the filter and scroll the All
+    // favorites list to the same GIF.
+    if (selectedCategory && (card as HTMLElement).dataset.favGifKey) {
+        const divider = document.createElement("div");
+        divider.style.cssText = "height:1px;margin:5px 0;background:var(--background-modifier-accent,rgba(255,255,255,.12));";
+        menu.append(divider);
+        menu.append(menuButton("Jump to in All", () => {
+            closeMenu();
+            void jumpToInAll(key);
+        }));
+    }
+
     // Keep the context menu inside the picker subtree. Discord treats clicks
     // outside its picker as dismissal; mounting the menu under document.body
     // makes selecting a category close the picker immediately.
@@ -944,6 +1142,21 @@ function renderCategoryBar() {
                 return;
             }
             selectedCategory = selectedCategory === id ? null : id;
+            // The category view reuses Discord's result scroller, which is
+            // unmounted while a search filters everything out. Drop the stale
+            // search so opening a category can never show a blank panel.
+            if (selectedCategory && clearFavoriteSearch()) {
+                const render = (tries: number) => {
+                    if (resultContainers()[0] || tries <= 0) {
+                        processCards();
+                        scheduleScan();
+                        return;
+                    }
+                    window.setTimeout(() => render(tries - 1), 100);
+                };
+                render(8);
+                return;
+            }
             processCards();
             scheduleScan();
         });
