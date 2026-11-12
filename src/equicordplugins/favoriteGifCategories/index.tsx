@@ -1418,12 +1418,7 @@ function renderCategoryBar() {
 
     const categoryRow = document.createElement("div");
     categoryRow.setAttribute("data-fav-gif-category-list", "true");
-    categoryRow.style.cssText = "display:flex;align-items:center;gap:6px;width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;overscroll-behavior-x:contain;padding:1px 0;";
-    categoryRow.addEventListener("wheel", event => {
-        if (categoryRow.scrollWidth <= categoryRow.clientWidth || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-        event.preventDefault();
-        categoryRow.scrollLeft += event.deltaY;
-    }, { passive: false });
+    categoryRow.style.cssText = "display:flex;align-items:center;flex-wrap:wrap;gap:6px;width:100%;min-width:0;overflow:visible;padding:1px 0;";
 
     const actionRow = document.createElement("div");
     actionRow.setAttribute("data-fav-gif-category-actions", "true");
