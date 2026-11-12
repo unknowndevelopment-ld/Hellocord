@@ -51,6 +51,7 @@ let suppressCategoryClick = false;
 let categoryActivationInProgress = false;
 let nativeGifSelector: ((gif: { url: string; [key: string]: any; }) => void) | null = null;
 let categoryQuery = "";
+let clearingFavoriteSearch = false;
 
 export function setGifCategoryFeature(feature: GifCategoryFeature, enabled: boolean) {
     if (enabled) enabledFeatures.add(feature);
@@ -583,8 +584,93 @@ function clearFavoriteSearch(): boolean {
     if (!input?.value) return false;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
     setter?.call(input, "");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+    clearingFavoriteSearch = true;
+    try {
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+    } finally {
+        clearingFavoriteSearch = false;
+    }
     return true;
+}
+
+const configuredCategorySearchInputs = new WeakSet<HTMLInputElement>();
+
+function updateCategorySearch(input: HTMLInputElement, value: string, caret = value.length) {
+    categoryQuery = value;
+    input.value = value;
+    input.setSelectionRange(caret, caret);
+    processCards();
+}
+
+function configureCategorySearch(input: HTMLInputElement, data: CategoryData) {
+    const active = !!selectedCategory && hasFeature("categorySearch");
+    if (!input.dataset.favGifOriginalPlaceholder) input.dataset.favGifOriginalPlaceholder = input.placeholder;
+
+    if (!active) {
+        input.placeholder = input.dataset.favGifOriginalPlaceholder;
+        if (input.dataset.favGifCategorySearch) input.value = "";
+        delete input.dataset.favGifCategorySearch;
+        return;
+    }
+
+    const categoryName = selectedCategory === MOST_USED_CATEGORY
+        ? "Most Used"
+        : data.categories.find(category => category.id === selectedCategory)?.name || "Category";
+    input.dataset.favGifCategorySearch = "true";
+    input.placeholder = `Search ${categoryName}`;
+    if (input.value !== categoryQuery) input.value = categoryQuery;
+
+    if (configuredCategorySearchInputs.has(input)) return;
+    configuredCategorySearchInputs.add(input);
+    input.addEventListener("input", event => {
+        if (clearingFavoriteSearch || !selectedCategory || !hasFeature("categorySearch")) return;
+        event.stopPropagation();
+        categoryQuery = input.value;
+        processCards();
+    }, true);
+    input.addEventListener("keydown", event => {
+        if (!selectedCategory || !hasFeature("categorySearch") || event.isComposing) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        const { value: currentValue } = input;
+        const start = input.selectionStart ?? currentValue.length;
+        const end = input.selectionEnd ?? start;
+        let value = currentValue;
+        let caret = start;
+
+        if (event.key.length === 1) {
+            value = value.slice(0, start) + event.key + value.slice(end);
+            caret = start + event.key.length;
+        } else if (event.key === "Backspace") {
+            if (start !== end) value = value.slice(0, start) + value.slice(end);
+            else if (start > 0) {
+                value = value.slice(0, start - 1) + value.slice(end);
+                caret = start - 1;
+            }
+        } else if (event.key === "Delete") {
+            value = value.slice(0, start) + value.slice(start === end ? end + 1 : end);
+        } else {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        updateCategorySearch(input, value, caret);
+    }, true);
+    input.addEventListener("paste", event => {
+        if (!selectedCategory || !hasFeature("categorySearch")) return;
+        const text = event.clipboardData?.getData("text") || "";
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        event.preventDefault();
+        event.stopPropagation();
+        updateCategorySearch(input, input.value.slice(0, start) + text + input.value.slice(end), start + text.length);
+    }, true);
+    input.addEventListener("search", event => {
+        if (!selectedCategory || !hasFeature("categorySearch")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        updateCategorySearch(input, input.value);
+    }, true);
 }
 
 /**
@@ -1260,6 +1346,9 @@ function renderCategoryBar() {
     const existingBars = Array.from(document.querySelectorAll<HTMLElement>(HEADER_MARK));
     existingBars.slice(1).forEach(bar => bar.remove());
     const data = loadData();
+    // Category Search reuses Discord's native Favorites field. Configure it
+    // even when the category bar itself does not need to be rebuilt.
+    configureCategorySearch(input, data);
     const renderKey = JSON.stringify({ categories: data.categories, selectedCategory, features: [...enabledFeatures].sort() });
     const existingBar = existingBars[0];
     if (existingBar?.dataset.renderKey === renderKey) return;
@@ -1381,21 +1470,6 @@ function renderCategoryBar() {
         duplicates.style.cssText = "height:26px;padding:0 9px;border:0;border-radius:4px;background:var(--background-secondary,#2b2d31);color:var(--text-normal,#dbdee1);font-size:12px;cursor:pointer;";
         duplicates.addEventListener("click", () => void findAndRemoveDuplicates());
         bar.append(duplicates);
-    }
-
-    if (selectedCategory && hasFeature("categorySearch")) {
-        const search = document.createElement("input");
-        search.type = "search";
-        search.value = categoryQuery;
-        search.placeholder = selectedCategory === MOST_USED_CATEGORY ? "Search most used GIFs" : "Search this category";
-        search.setAttribute("aria-label", search.placeholder);
-        search.style.cssText = "flex:1 1 150px;min-width:120px;height:26px;padding:0 9px;border:1px solid var(--input-border,#1e1f22);border-radius:4px;background:var(--input-background,#1e1f22);color:var(--text-normal,#dbdee1);font-size:12px;outline:none;";
-        search.addEventListener("input", () => {
-            categoryQuery = search.value;
-            processCards();
-        });
-
-        bar.append(search);
     }
 
     if (selectedCategory && hasFeature("randomButton")) {
@@ -1740,5 +1814,6 @@ export default definePlugin({
         });
         selectedCategory = null;
         categoryQuery = "";
+        favoriteSearchInputs().forEach(input => configureCategorySearch(input, loadData()));
     }
 });
