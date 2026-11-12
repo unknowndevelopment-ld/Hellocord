@@ -20,6 +20,8 @@
 import "~plugins";
 import "./fixWeirdAppRegionBug.css";
 
+import gitHash from "~git-hash";
+
 import nativeTitleBarStyles from "./nativeTitleBar.css?managed";
 
 export * as Api from "./api";
@@ -34,26 +36,23 @@ export { PlainSettings, Settings };
 import { enableStyle, initStyles } from "@api/Styles";
 import { ChangelogTab, openSettingsTabModal, UpdaterTab } from "@components/settings";
 import {
-    getCommitsSinceLastSeen,
-    getLastSeenHash,
     getNewPlugins,
     getNewSettings,
     getUpdatedPlugins,
-    initializeChangelog,
     saveUpdateSession,
 } from "@components/settings/tabs/changelog/changelogManager";
 import { debounce } from "@shared/debounce";
 import { StartAt } from "@utils/types";
 import { SettingsRouter } from "@webpack/common";
 
-import { get as dsGet } from "./api/DataStore";
+import { del as dsDel, get as dsGet } from "./api/DataStore";
 import { showNotice } from "./api/Notices";
 import { showNotification } from "./api/Notifications";
 import { initPluginManager, PMLogger, startAllPlugins } from "./api/PluginManager";
 import { PlainSettings, Settings, SettingsStore } from "./api/Settings";
 import { areLocalSettingsDirty, getCloudSettings, getCloudSyncDirection, markLocalSettingsDirty, putCloudSettings, shouldCloudSync } from "./api/SettingsSync/cloudSync";
 import { relaunch } from "./utils/native";
-import { checkForUpdates, getRepo, update, UpdateLogger } from "./utils/updater";
+import { checkForUpdates, PENDING_UPDATE_CHANGELOG_KEY, update, UpdateLogger } from "./utils/updater";
 import { onceReady } from "./webpack";
 import { patches } from "./webpack/patchWebpack";
 
@@ -131,17 +130,15 @@ async function syncSettings() {
 let notifiedForUpdatesThisSession = false;
 
 async function showInstalledUpdateSummary() {
-    if (IS_WEB || IS_UPDATER_DISABLED) return;
+    if (IS_WEB) return;
 
     try {
-        const previousHash = await getLastSeenHash();
-        if (!previousHash) {
-            await initializeChangelog();
-            return;
-        }
-
-        const commits = await getCommitsSinceLastSeen(await getRepo());
-        if (!commits.length) return;
+        const pending = await dsGet(PENDING_UPDATE_CHANGELOG_KEY) as {
+            fromHash?: string;
+            commits?: Array<{ hash: string; author: string; message: string; }>;
+        } | undefined;
+        if (!pending?.commits?.length || pending.fromHash === gitHash) return;
+        const { commits } = pending;
 
         const [newPlugins, updatedPlugins, newSettings] = await Promise.all([
             getNewPlugins(),
@@ -149,6 +146,7 @@ async function showInstalledUpdateSummary() {
             getNewSettings(),
         ]);
         await saveUpdateSession(commits, newPlugins, updatedPlugins, newSettings);
+        await dsDel(PENDING_UPDATE_CHANGELOG_KEY);
 
         const additions = [
             newPlugins.length && `${newPlugins.length} new plugin${newPlugins.length === 1 ? "" : "s"}`,

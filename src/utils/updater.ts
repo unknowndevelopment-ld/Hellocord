@@ -16,6 +16,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+import { DataStore } from "@api/index";
+
 import gitHash from "~git-hash";
 
 import { Logger } from "./Logger";
@@ -27,6 +29,7 @@ export let isOutdated = false;
 export let isNewer = false;
 export let updateError: any;
 export let changes: Record<"hash" | "author" | "message", string>[];
+export const PENDING_UPDATE_CHANGELOG_KEY = "Hellocord_PendingUpdateChangelog";
 
 async function Unwrap<T>(p: Promise<IpcRes<T>>) {
     const res = await p;
@@ -57,6 +60,13 @@ export async function update() {
     const res = await Unwrap(VencordNative.updater.fetchUpdate());
 
     if (res) {
+        if (changes?.length) {
+            await DataStore.set(PENDING_UPDATE_CHANGELOG_KEY, {
+                fromHash: gitHash,
+                commits: changes,
+                timestamp: Date.now(),
+            });
+        }
         isOutdated = false;
         if (!await Unwrap(VencordNative.updater.applyUpdate()))
             throw new Error("Failed to apply the update.");
