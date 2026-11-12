@@ -43,6 +43,8 @@ type BackupGif = { key: string; src: string; format: number; width: number; heig
 type CategoryBackup = { version: 1; exportedAt: string; categories: Category[]; gifs: BackupGif[] };
 
 let observer: MutationObserver | null = null;
+let categoryViewObserver: ResizeObserver | null = null;
+let observedCategoryResults = new WeakSet<HTMLElement>();
 let selectedCategory: string | null = null;
 let currentMenu: HTMLElement | null = null;
 let currentDialog: HTMLElement | null = null;
@@ -1596,6 +1598,16 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
         || resultContainers()[0];
     if (!results) return;
 
+    // Discord's picker is width-resizable. Track the result area so category
+    // tiles reflow instead of keeping stale card widths from the last render.
+    if (!categoryViewObserver) {
+        categoryViewObserver = new ResizeObserver(() => scheduleScan());
+    }
+    if (!observedCategoryResults.has(results)) {
+        observedCategoryResults.add(results);
+        categoryViewObserver.observe(results);
+    }
+
     const matches = categoryItems(categoryId, data);
 
     // Reuse Discord's GIF result scroller so its themed scrollbar and wheel
@@ -1622,7 +1634,12 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
 
     const listHeight = Math.max(1, Math.ceil(matches.length / 2)) * 272 + 24;
     view.style.cssText = "position:absolute;left:0;right:0;top:0;";
-    const renderKey = JSON.stringify({ categoryId, query: categoryQuery, matches: matches.map(m => [m.key, m.src]) });
+    const renderKey = JSON.stringify({
+        categoryId,
+        query: categoryQuery,
+        width: Math.round(results.clientWidth),
+        matches: matches.map(m => [m.key, m.src])
+    });
     if (view.dataset.renderKey === renderKey && view.childElementCount > 0) {
         contentEl.style.height = view.dataset.contentHeight || `${listHeight}px`;
         return;
@@ -1650,10 +1667,9 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
     const templateFavorite = results.querySelector<HTMLElement>(FAVORITE_BUTTON);
     const templateDownload = results.querySelector<HTMLElement>(DOWNLOAD_BUTTON);
     const downloadSvg = `<svg class="${classes.icon}" aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-    const colWidth = (() => {
-        const native = nativeResultCards()[0]?.getBoundingClientRect().width;
-        return Math.max(80, native && native > 0 ? native : (results.clientWidth - 36) / 2);
-    })();
+    // Two columns with 12px outer margins and a 12px gutter. Deriving this
+    // from the live result width keeps the grid correct at every drawer size.
+    const colWidth = Math.max(80, (results.clientWidth - 36) / 2);
     const columns = [12, 24 + colWidth];
     const columnTops = [0, 0];
     let duplicateRowTop = 0;
@@ -1904,6 +1920,7 @@ export default definePlugin({
     },
     start() {
         migrateLegacySettings();
+        observedCategoryResults = new WeakSet();
         scan();
         document.addEventListener("click", onPickerClick, true);
         document.addEventListener("contextmenu", onContextMenu, true);
@@ -1914,6 +1931,9 @@ export default definePlugin({
         nativeGifSelector = null;
         observer?.disconnect();
         observer = null;
+        categoryViewObserver?.disconnect();
+        categoryViewObserver = null;
+        observedCategoryResults = new WeakSet();
         document.removeEventListener("click", onPickerClick, true);
         document.removeEventListener("contextmenu", onContextMenu, true);
         if (scanTimer != null) clearTimeout(scanTimer);
