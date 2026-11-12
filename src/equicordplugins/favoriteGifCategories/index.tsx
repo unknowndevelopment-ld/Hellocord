@@ -19,6 +19,7 @@ type CategoryData = {
     usage: Record<string, { count: number; lastUsed: number; }>;
 };
 type FavoriteItem = { key: string; src: string; format: number; width: number; height: number; order: number };
+type DuplicateItem = FavoriteItem & { rawKey: string; duplicateRole: "Keep" | "Duplicate"; };
 
 // Discord hashes its class names per build, so keep the old explicit class as
 // a fallback and otherwise identify result cards by structure (role=button
@@ -31,6 +32,7 @@ const CATEGORY_VIEW_MARK = "[data-fav-gif-category-view]";
 const HEADER_MARK = "[data-fav-gif-category-bar]";
 const FOLDER_ICON = "<svg aria-hidden=\"true\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><path d=\"M10 4H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H12l-2-2Z\"/></svg>";
 const MOST_USED_CATEGORY = "__most-used__";
+const DUPLICATES_CATEGORY = "__duplicates__";
 export type GifCategoryFeature = "mostUsed" | "duplicateFinder" | "categorySearch" | "randomButton";
 const enabledFeatures = new Set<GifCategoryFeature>();
 const BACKUP_FORMAT = "EquicordGifCategories";
@@ -52,11 +54,16 @@ let categoryActivationInProgress = false;
 let nativeGifSelector: ((gif: { url: string; [key: string]: any; }) => void) | null = null;
 let categoryQuery = "";
 let clearingFavoriteSearch = false;
+let duplicateGroups: DuplicateItem[][] = [];
 
 export function setGifCategoryFeature(feature: GifCategoryFeature, enabled: boolean) {
     if (enabled) enabledFeatures.add(feature);
     else enabledFeatures.delete(feature);
     if (feature === "mostUsed" && !enabled && selectedCategory === MOST_USED_CATEGORY) selectedCategory = null;
+    if (feature === "duplicateFinder" && !enabled) {
+        duplicateGroups = [];
+        if (selectedCategory === DUPLICATES_CATEGORY) selectedCategory = null;
+    }
     if (feature === "categorySearch" && !enabled) categoryQuery = "";
     scheduleScan();
 }
@@ -615,7 +622,9 @@ function configureCategorySearch(input: HTMLInputElement, data: CategoryData) {
 
     const categoryName = selectedCategory === MOST_USED_CATEGORY
         ? "Most Used"
-        : data.categories.find(category => category.id === selectedCategory)?.name || "Category";
+        : selectedCategory === DUPLICATES_CATEGORY
+            ? "Duplicates"
+            : data.categories.find(category => category.id === selectedCategory)?.name || "Category";
     input.dataset.favGifCategorySearch = "true";
     input.placeholder = `Search ${categoryName}`;
     if (input.value !== categoryQuery) input.value = categoryQuery;
@@ -956,6 +965,8 @@ function categoryItems(categoryId: string, data: CategoryData, query = categoryQ
                     || (bUsage?.lastUsed || 0) - (aUsage?.lastUsed || 0)
                     || b.order - a.order;
             });
+    } else if (categoryId === DUPLICATES_CATEGORY) {
+        matches = duplicateGroups.flat();
     } else {
         const assigned = new Map(items
             .filter(item => (data.assignments[item.key] || []).includes(categoryId))
@@ -983,11 +994,15 @@ function categoryItems(categoryId: string, data: CategoryData, query = categoryQ
     });
 }
 
-async function findAndRemoveDuplicates() {
+function findDuplicateGroups(): DuplicateItem[][] {
     const entries = Object.entries(favoriteGifEntries()).map(([rawKey, gif]: [string, any]) => ({
         rawKey,
         key: canonicalKey(rawKey),
         media: canonicalKey(String(gif?.src || rawKey)),
+        src: typeof gif?.src === "string" && gif.src ? gif.src : rawKey,
+        format: Number(gif?.format) || 1,
+        width: Number(gif?.width) || 0,
+        height: Number(gif?.height) || 0,
         order: Number(gif?.order) || 0
     }));
     const byMedia = new Map<string, typeof entries>();
@@ -996,21 +1011,51 @@ async function findAndRemoveDuplicates() {
         group.push(entry);
         byMedia.set(entry.media, group);
     }
-    const groups = [...byMedia.values()].filter(group => group.length > 1);
-    const duplicateCount = groups.reduce((total, group) => total + group.length - 1, 0);
+    return [...byMedia.values()]
+        .filter(group => group.length > 1)
+        .map(group => group
+            .sort((a, b) => b.order - a.order)
+            .map((item, index) => ({
+                rawKey: item.rawKey,
+                key: item.key,
+                src: item.src,
+                format: item.format,
+                width: item.width,
+                height: item.height,
+                order: item.order,
+                duplicateRole: index === 0 ? "Keep" as const : "Duplicate" as const
+            })));
+}
+
+function showDuplicates() {
+    duplicateGroups = findDuplicateGroups();
+    const duplicateCount = duplicateGroups.reduce((total, group) => total + group.length - 1, 0);
     if (!duplicateCount) {
+        if (selectedCategory === DUPLICATES_CATEGORY) selectedCategory = null;
         showToast({ text: "No duplicate favorite GIFs found", variant: "success" } as any);
+        processCards();
+        scheduleScan();
         return;
     }
 
+    categoryQuery = "";
+    selectedCategory = DUPLICATES_CATEGORY;
+    if (clearFavoriteSearch()) window.setTimeout(processCards, 100);
+    else processCards();
+    scheduleScan();
+}
+
+async function removeFoundDuplicates() {
+    const groups = duplicateGroups.length ? duplicateGroups : findDuplicateGroups();
+    const duplicateCount = groups.reduce((total, group) => total + group.length - 1, 0);
+    if (!duplicateCount) return;
     if (!window.confirm(`Found ${duplicateCount} duplicate GIF${duplicateCount === 1 ? "" : "s"} in ${groups.length} group${groups.length === 1 ? "" : "s"}. Remove duplicates and keep the newest copy?`)) return;
 
     const data = loadData();
     const removals = new Set<string>();
     for (const group of groups) {
-        group.sort((a, b) => b.order - a.order);
         const keeper = group[0].key;
-        const duplicateKeys = group.slice(1).map(entry => entry.key);
+        const duplicateKeys = [...new Set(group.slice(1).map(entry => entry.key).filter(key => key !== keeper))];
         group.slice(1).forEach(entry => removals.add(entry.rawKey));
 
         const mergedCategories = new Set(data.assignments[keeper] || []);
@@ -1036,6 +1081,8 @@ async function findAndRemoveDuplicates() {
         for (const rawKey of removals) delete draft.gifs?.[rawKey];
     }, 0);
     saveData(data);
+    duplicateGroups = [];
+    selectedCategory = null;
     scheduleScan();
     showToast({ text: `Removed ${duplicateCount} duplicate GIF${duplicateCount === 1 ? "" : "s"}`, variant: "success" } as any);
 }
@@ -1349,7 +1396,12 @@ function renderCategoryBar() {
     // Category Search reuses Discord's native Favorites field. Configure it
     // even when the category bar itself does not need to be rebuilt.
     configureCategorySearch(input, data);
-    const renderKey = JSON.stringify({ categories: data.categories, selectedCategory, features: [...enabledFeatures].sort() });
+    const renderKey = JSON.stringify({
+        categories: data.categories,
+        selectedCategory,
+        features: [...enabledFeatures].sort(),
+        duplicates: duplicateGroups.map(group => group.map(item => item.rawKey))
+    });
     const existingBar = existingBars[0];
     if (existingBar?.dataset.renderKey === renderKey) return;
 
@@ -1449,6 +1501,10 @@ function renderCategoryBar() {
 
     bar.append(button(null, "All"));
     if (hasFeature("mostUsed")) bar.append(button(MOST_USED_CATEGORY, "★ Most Used"));
+    if (hasFeature("duplicateFinder") && duplicateGroups.length) {
+        const duplicateCount = duplicateGroups.reduce((total, group) => total + group.length - 1, 0);
+        bar.append(button(DUPLICATES_CATEGORY, `⚠ Duplicates (${duplicateCount})`));
+    }
     for (const category of data.categories) bar.append(button(category.id, category.name, true));
 
     const add = document.createElement("button");
@@ -1465,11 +1521,22 @@ function renderCategoryBar() {
         const duplicates = document.createElement("button");
         isolateInjectedInteraction(duplicates);
         duplicates.type = "button";
-        duplicates.textContent = "Duplicates";
-        duplicates.title = "Find and remove duplicate favorite GIFs";
+        duplicates.textContent = duplicateGroups.length ? "Rescan Duplicates" : "Find Duplicates";
+        duplicates.title = "Find duplicate favorite GIFs and show them side by side";
         duplicates.style.cssText = "height:26px;padding:0 9px;border:0;border-radius:4px;background:var(--background-secondary,#2b2d31);color:var(--text-normal,#dbdee1);font-size:12px;cursor:pointer;";
-        duplicates.addEventListener("click", () => void findAndRemoveDuplicates());
+        duplicates.addEventListener("click", showDuplicates);
         bar.append(duplicates);
+
+        if (selectedCategory === DUPLICATES_CATEGORY && duplicateGroups.length) {
+            const remove = document.createElement("button");
+            isolateInjectedInteraction(remove);
+            remove.type = "button";
+            remove.textContent = "Remove Duplicates";
+            remove.title = "Keep the newest copy in each row and remove the others";
+            remove.style.cssText = "height:26px;padding:0 9px;border:0;border-radius:4px;background:var(--status-danger,#da373c);color:white;font-size:12px;font-weight:600;cursor:pointer;";
+            remove.addEventListener("click", () => void removeFoundDuplicates());
+            bar.append(remove);
+        }
     }
 
     if (selectedCategory && hasFeature("randomButton")) {
@@ -1544,6 +1611,8 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
             ? "No GIFs match this category search."
             : categoryId === MOST_USED_CATEGORY
                 ? "No usage yet. GIFs you send will appear here."
+                : categoryId === DUPLICATES_CATEGORY
+                    ? "No duplicate favorite GIFs found."
                 : "No GIFs in this category yet. Right-click a favorite to add one.";
         empty.style.cssText = "grid-column:1/-1;padding:24px 12px;color:var(--text-muted,#949ba4);text-align:center;font-size:13px;";
         view.append(empty);
@@ -1561,7 +1630,9 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
     })();
     const columns = [12, 24 + colWidth];
     const columnTops = [0, 0];
-    for (const item of matches) {
+    let duplicateRowTop = 0;
+    let duplicateRowHeight = 0;
+    for (const [index, item] of matches.entries()) {
         const card = document.createElement("div");
         card.className = classes.card;
         card.title = item.key;
@@ -1572,9 +1643,18 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
 
         const ratio = item.width > 0 && item.height > 0 ? item.height / item.width : 1.125;
         const cardHeight = Math.max(80, Math.min(520, colWidth * ratio));
-        const column = columnTops[0] <= columnTops[1] ? 0 : 1;
-        card.style.cssText = `position:absolute;left:${columns[column]}px;width:${colWidth}px;top:${columnTops[column]}px;height:${cardHeight}px;overflow:hidden;border-radius:8px;cursor:pointer;`;
-        columnTops[column] += cardHeight + 12;
+        const duplicateView = categoryId === DUPLICATES_CATEGORY;
+        const column = duplicateView ? index % 2 : columnTops[0] <= columnTops[1] ? 0 : 1;
+        const top = duplicateView ? duplicateRowTop : columnTops[column];
+        card.style.cssText = `position:absolute;left:${columns[column]}px;width:${colWidth}px;top:${top}px;height:${cardHeight}px;overflow:hidden;border-radius:8px;cursor:pointer;`;
+        columnTops[column] = top + cardHeight + 12;
+        if (duplicateView) {
+            duplicateRowHeight = Math.max(duplicateRowHeight, cardHeight);
+            if (column === 1 || index === matches.length - 1) {
+                duplicateRowTop += duplicateRowHeight + 12;
+                duplicateRowHeight = 0;
+            }
+        }
 
         const rawSrc = item.src;
         const video = item.format === 2 || /\.(mp4|webm)(?:\?|$)/i.test(rawSrc);
@@ -1603,6 +1683,13 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
             usage.textContent = `${count} use${count === 1 ? "" : "s"}`;
             usage.style.cssText = "position:absolute;left:6px;bottom:6px;z-index:2;padding:3px 6px;border-radius:8px;background:rgba(0,0,0,.72);color:white;font-size:11px;font-weight:600;pointer-events:none;";
             card.append(usage);
+        }
+
+        if (categoryId === DUPLICATES_CATEGORY) {
+            const role = document.createElement("span");
+            role.textContent = (item as DuplicateItem).duplicateRole;
+            role.style.cssText = `position:absolute;left:6px;bottom:6px;z-index:2;padding:3px 6px;border-radius:8px;background:${(item as DuplicateItem).duplicateRole === "Keep" ? "var(--status-positive,#23a55a)" : "var(--status-danger,#da373c)"};color:white;font-size:11px;font-weight:700;pointer-events:none;`;
+            card.append(role);
         }
 
         const favorite = templateFavorite?.cloneNode(true) as HTMLElement || document.createElement("div");
@@ -1668,6 +1755,7 @@ function processCards() {
     if (!inFavorites) {
         selectedCategory = null;
         categoryQuery = "";
+        duplicateGroups = [];
         restoreCategoryView();
         clearTemporaryHides(cards);
         return;
@@ -1814,6 +1902,7 @@ export default definePlugin({
         });
         selectedCategory = null;
         categoryQuery = "";
+        duplicateGroups = [];
         favoriteSearchInputs().forEach(input => configureCategorySearch(input, loadData()));
     }
 });
