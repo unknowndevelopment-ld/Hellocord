@@ -15,7 +15,10 @@ type CategoryData = {
     assignments: Record<string, string[]>;
     /** Keys per category, newest addition first, so new GIFs appear on top. */
     order: Record<string, string[]>;
+    /** Local send count and last-used time for the dynamic Most Used view. */
+    usage: Record<string, { count: number; lastUsed: number; }>;
 };
+type FavoriteItem = { key: string; src: string; format: number; width: number; height: number; order: number };
 
 // Discord hashes its class names per build, so keep the old explicit class as
 // a fallback and otherwise identify result cards by structure (role=button
@@ -27,6 +30,7 @@ const DOWNLOAD_BUTTON = '[aria-label="Download GIF"]';
 const CATEGORY_VIEW_MARK = "[data-fav-gif-category-view]";
 const HEADER_MARK = "[data-fav-gif-category-bar]";
 const FOLDER_ICON = "<svg aria-hidden=\"true\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><path d=\"M10 4H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H12l-2-2Z\"/></svg>";
+const MOST_USED_CATEGORY = "__most-used__";
 const BACKUP_FORMAT = "EquicordGifCategories";
 // Shared bundle key: this hides backup contents from casual inspection, but is
 // intentionally portable and is not a security boundary against plugin readers.
@@ -44,6 +48,7 @@ let draggedCategoryId: string | null = null;
 let suppressCategoryClick = false;
 let categoryActivationInProgress = false;
 let nativeGifSelector: ((gif: { url: string; [key: string]: any; }) => void) | null = null;
+let categoryQuery = "";
 
 function favoriteSearchInputs(root: ParentNode = document): HTMLInputElement[] {
     const candidates = Array.from(root.querySelectorAll<HTMLInputElement>("input"));
@@ -123,10 +128,11 @@ function loadData(): CategoryData {
         return {
             categories: Array.isArray(parsed.categories) ? parsed.categories.filter((c: any) => c && typeof c.id === "string" && typeof c.name === "string") : [],
             assignments: parsed.assignments && typeof parsed.assignments === "object" ? parsed.assignments : {},
-            order
+            order,
+            usage: parsed.usage && typeof parsed.usage === "object" ? parsed.usage : {}
         };
     } catch {
-        return { categories: [], assignments: {}, order: {} };
+        return { categories: [], assignments: {}, order: {}, usage: {} };
     }
 }
 
@@ -145,6 +151,18 @@ function forgetEntry(data: CategoryData, categoryId: string, key: string) {
     const list = (data.order[categoryId] || []).filter(existing => existing !== key);
     if (list.length) data.order[categoryId] = list;
     else delete data.order[categoryId];
+}
+
+function noteGifUsed(key: string) {
+    const canonical = canonicalKey(key);
+    if (!canonical) return;
+    const data = loadData();
+    const previous = data.usage[canonical];
+    data.usage[canonical] = {
+        count: (Number(previous?.count) || 0) + 1,
+        lastUsed: Date.now()
+    };
+    saveData(data);
 }
 
 function getFavoriteStore() {
@@ -436,6 +454,7 @@ function pickerClasses() {
 }
 
 function selectCategoryGif(item: { src: string; format: number; width: number; height: number; key: string; }) {
+    noteGifUsed(item.key);
     if (nativeGifSelector) {
         // Discord's picker callback accepts the selected media URL and sends
         // it through the same path as clicking a native GIF result.
@@ -805,6 +824,121 @@ function favoriteGifEntries(): Record<string, any> {
     }
 }
 
+function favoriteItems(): FavoriteItem[] {
+    const unique = new Map<string, FavoriteItem>();
+    for (const [rawKey, gif] of Object.entries(favoriteGifEntries()) as Array<[string, any]>) {
+        const item = {
+            key: canonicalKey(rawKey),
+            src: typeof gif?.src === "string" && gif.src ? gif.src : rawKey,
+            format: Number(gif?.format) || 1,
+            width: Number(gif?.width) || 0,
+            height: Number(gif?.height) || 0,
+            order: Number(gif?.order) || 0
+        };
+        const previous = unique.get(item.key);
+        if (!previous || item.order > previous.order) unique.set(item.key, item);
+    }
+    return [...unique.values()];
+}
+
+function categoryItems(categoryId: string, data: CategoryData, query = categoryQuery): FavoriteItem[] {
+    const items = favoriteItems();
+    let matches: FavoriteItem[];
+
+    if (categoryId === MOST_USED_CATEGORY) {
+        matches = items
+            .filter(item => (data.usage[item.key]?.count || 0) > 0)
+            .sort((a, b) => {
+                const aUsage = data.usage[a.key];
+                const bUsage = data.usage[b.key];
+                return (bUsage?.count || 0) - (aUsage?.count || 0)
+                    || (bUsage?.lastUsed || 0) - (aUsage?.lastUsed || 0)
+                    || b.order - a.order;
+            });
+    } else {
+        const assigned = new Map(items
+            .filter(item => (data.assignments[item.key] || []).includes(categoryId))
+            .map(item => [item.key, item]));
+        matches = [];
+        const seen = new Set<string>();
+        for (const orderedKey of data.order[categoryId] || []) {
+            const canonical = canonicalKey(orderedKey);
+            const item = assigned.get(canonical);
+            if (!item || seen.has(canonical)) continue;
+            matches.push(item);
+            seen.add(canonical);
+        }
+        matches.push(...[...assigned.values()]
+            .filter(item => !seen.has(item.key))
+            .sort((a, b) => b.order - a.order));
+    }
+
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    if (!normalizedQuery) return matches;
+    return matches.filter(item => {
+        let searchable = `${item.key} ${item.src}`.toLocaleLowerCase();
+        try { searchable += ` ${decodeURIComponent(searchable)}`; } catch { }
+        return normalizedQuery.split(/\s+/).every(term => searchable.includes(term));
+    });
+}
+
+async function findAndRemoveDuplicates() {
+    const entries = Object.entries(favoriteGifEntries()).map(([rawKey, gif]: [string, any]) => ({
+        rawKey,
+        key: canonicalKey(rawKey),
+        media: canonicalKey(String(gif?.src || rawKey)),
+        order: Number(gif?.order) || 0
+    }));
+    const byMedia = new Map<string, typeof entries>();
+    for (const entry of entries) {
+        const group = byMedia.get(entry.media) || [];
+        group.push(entry);
+        byMedia.set(entry.media, group);
+    }
+    const groups = [...byMedia.values()].filter(group => group.length > 1);
+    const duplicateCount = groups.reduce((total, group) => total + group.length - 1, 0);
+    if (!duplicateCount) {
+        showToast({ text: "No duplicate favorite GIFs found", variant: "success" } as any);
+        return;
+    }
+
+    if (!window.confirm(`Found ${duplicateCount} duplicate GIF${duplicateCount === 1 ? "" : "s"} in ${groups.length} group${groups.length === 1 ? "" : "s"}. Remove duplicates and keep the newest copy?`)) return;
+
+    const data = loadData();
+    const removals = new Set<string>();
+    for (const group of groups) {
+        group.sort((a, b) => b.order - a.order);
+        const keeper = group[0].key;
+        const duplicateKeys = group.slice(1).map(entry => entry.key);
+        group.slice(1).forEach(entry => removals.add(entry.rawKey));
+
+        const mergedCategories = new Set(data.assignments[keeper] || []);
+        let mergedCount = data.usage[keeper]?.count || 0;
+        let latestUse = data.usage[keeper]?.lastUsed || 0;
+        for (const duplicate of duplicateKeys) {
+            (data.assignments[duplicate] || []).forEach(id => mergedCategories.add(id));
+            mergedCount += data.usage[duplicate]?.count || 0;
+            latestUse = Math.max(latestUse, data.usage[duplicate]?.lastUsed || 0);
+            delete data.assignments[duplicate];
+            delete data.usage[duplicate];
+        }
+        if (mergedCategories.size) data.assignments[keeper] = [...mergedCategories];
+        if (mergedCount) data.usage[keeper] = { count: mergedCount, lastUsed: latestUse };
+        for (const category of data.categories) {
+            const replaced = (data.order[category.id] || []).map(key => duplicateKeys.includes(canonicalKey(key)) ? keeper : key);
+            data.order[category.id] = [...new Set(replaced)];
+        }
+    }
+
+    const store = getFavoriteStore();
+    await store.updateAsync("favoriteGifs", (draft: any) => {
+        for (const rawKey of removals) delete draft.gifs?.[rawKey];
+    }, 0);
+    saveData(data);
+    scheduleScan();
+    showToast({ text: `Removed ${duplicateCount} duplicate GIF${duplicateCount === 1 ? "" : "s"}`, variant: "success" } as any);
+}
+
 /**
  * Rendering a trending GIF and storing it as a favorite can use different
  * URLs (preview media vs. the Tenor/Klipy page), so remember the mapping for
@@ -1128,10 +1262,11 @@ function renderCategoryBar() {
 
     const button = (id: string | null, name: string, icon = false) => {
         const b = document.createElement("button");
+        const isSavedCategory = !!id && data.categories.some(category => category.id === id);
         isolateInjectedInteraction(b);
         b.type = "button";
         b.dataset.categoryId = id || "";
-        b.style.cssText = `display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 9px;line-height:1;border-radius:14px;border:1px solid var(--background-modifier-accent,rgba(255,255,255,.12));background:${selectedCategory === id ? "var(--brand-experiment,#5865f2)" : "var(--background-secondary,#2b2d31)"};color:var(--text-normal,#dbdee1);font-size:12px;cursor:${id ? "grab" : "pointer"};`;
+        b.style.cssText = `display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 9px;line-height:1;border-radius:14px;border:1px solid var(--background-modifier-accent,rgba(255,255,255,.12));background:${selectedCategory === id ? "var(--brand-experiment,#5865f2)" : "var(--background-secondary,#2b2d31)"};color:var(--text-normal,#dbdee1);font-size:12px;cursor:${isSavedCategory ? "grab" : "pointer"};`;
         if (icon) b.insertAdjacentHTML("afterbegin", FOLDER_ICON);
         const text = document.createElement("span");
         text.textContent = name;
@@ -1141,6 +1276,7 @@ function renderCategoryBar() {
                 suppressCategoryClick = false;
                 return;
             }
+            categoryQuery = "";
             selectedCategory = selectedCategory === id ? null : id;
             // The category view reuses Discord's result scroller, which is
             // unmounted while a search filters everything out. Drop the stale
@@ -1208,6 +1344,7 @@ function renderCategoryBar() {
     };
 
     bar.append(button(null, "All"));
+    bar.append(button(MOST_USED_CATEGORY, "★ Most Used"));
     for (const category of data.categories) bar.append(button(category.id, category.name, true));
 
     const add = document.createElement("button");
@@ -1219,6 +1356,44 @@ function renderCategoryBar() {
     add.style.cssText = "display:inline-flex;align-items:center;justify-content:center;flex:0 0 26px;width:26px;height:26px;padding:0;box-sizing:border-box;border-radius:50%;border:0;background:var(--background-secondary,#2b2d31);color:var(--text-normal,#dbdee1);font-size:18px;line-height:1;cursor:pointer;";
     add.addEventListener("click", manageCategories);
     bar.append(add);
+
+    const duplicates = document.createElement("button");
+    isolateInjectedInteraction(duplicates);
+    duplicates.type = "button";
+    duplicates.textContent = "Duplicates";
+    duplicates.title = "Find and remove duplicate favorite GIFs";
+    duplicates.style.cssText = "height:26px;padding:0 9px;border:0;border-radius:4px;background:var(--background-secondary,#2b2d31);color:var(--text-normal,#dbdee1);font-size:12px;cursor:pointer;";
+    duplicates.addEventListener("click", () => void findAndRemoveDuplicates());
+    bar.append(duplicates);
+
+    if (selectedCategory) {
+        const search = document.createElement("input");
+        search.type = "search";
+        search.value = categoryQuery;
+        search.placeholder = selectedCategory === MOST_USED_CATEGORY ? "Search most used GIFs" : "Search this category";
+        search.setAttribute("aria-label", search.placeholder);
+        search.style.cssText = "flex:1 1 150px;min-width:120px;height:26px;padding:0 9px;border:1px solid var(--input-border,#1e1f22);border-radius:4px;background:var(--input-background,#1e1f22);color:var(--text-normal,#dbdee1);font-size:12px;outline:none;";
+        search.addEventListener("input", () => {
+            categoryQuery = search.value;
+            processCards();
+        });
+
+        const random = document.createElement("button");
+        isolateInjectedInteraction(random);
+        random.type = "button";
+        random.textContent = "🎲 Random";
+        random.title = "Send a random GIF from this view";
+        random.style.cssText = "height:26px;padding:0 9px;border:0;border-radius:4px;background:var(--brand-experiment,#5865f2);color:white;font-size:12px;font-weight:600;cursor:pointer;";
+        random.addEventListener("click", () => {
+            const matches = categoryItems(selectedCategory!, loadData());
+            if (!matches.length) {
+                showToast({ text: categoryQuery ? "No GIFs match this search" : "This view has no GIFs yet" } as any);
+                return;
+            }
+            selectCategoryGif(matches[Math.floor(Math.random() * matches.length)]);
+        });
+        bar.append(search, random);
+    }
 
     // The Favorites title, search field and Bulk Download button share a
     // horizontal flex row. Insert after that whole row, not after the title
@@ -1233,44 +1408,7 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
         || resultContainers()[0];
     if (!results) return;
 
-    const assigned = new Map<string, { key: string; src: string; format: number; width: number; height: number }>();
-    const favoriteOrder = new Map<string, number>();
-    try {
-        const gifs = (UserSettingsActionCreators as any).FrecencyUserSettingsActionCreators.getCurrentValue()?.favoriteGifs?.gifs || {};
-        for (const [key, gif] of Object.entries(gifs) as Array<[string, any]>) {
-            const canonical = canonicalKey(key);
-            if (!(data.assignments[canonical] || []).includes(categoryId)) continue;
-            assigned.set(canonical, {
-                key: canonical,
-                src: typeof gif?.src === "string" && gif.src ? gif.src : key,
-                format: Number(gif?.format) || 1,
-                width: Number(gif?.width) || 0,
-                height: Number(gif?.height) || 0
-            });
-            favoriteOrder.set(canonical, Number(gif?.order) || 0);
-        }
-    } catch (error) {
-        console.error("[FavoriteGifCategories] Failed to read favorites", error);
-    }
-
-    // Newest addition first. Anything assigned before order tracking existed
-    // falls back to Discord's favorite order (again newest first).
-    const matches: Array<{ key: string; src: string; format: number; width: number; height: number }> = [];
-    const seen = new Set<string>();
-    for (const orderedKey of data.order[categoryId] || []) {
-        const canonical = canonicalKey(orderedKey);
-        const entry = assigned.get(canonical);
-        if (!entry || seen.has(canonical)) continue;
-        matches.push(entry);
-        seen.add(canonical);
-    }
-    const remaining = [...assigned.entries()]
-        .filter(([canonical]) => !seen.has(canonical))
-        .sort((a, b) => (favoriteOrder.get(b[0]) || 0) - (favoriteOrder.get(a[0]) || 0));
-    for (const [canonical, entry] of remaining) {
-        matches.push(entry);
-        seen.add(canonical);
-    }
+    const matches = categoryItems(categoryId, data);
 
     // Reuse Discord's GIF result scroller so its themed scrollbar and wheel
     // handling stay native. Keep the virtualizer mounted (but invisible) so
@@ -1296,7 +1434,7 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
 
     const listHeight = Math.max(1, Math.ceil(matches.length / 2)) * 272 + 24;
     view.style.cssText = "position:absolute;left:0;right:0;top:0;";
-    const renderKey = JSON.stringify({ categoryId, matches: matches.map(m => [m.key, m.src]) });
+    const renderKey = JSON.stringify({ categoryId, query: categoryQuery, matches: matches.map(m => [m.key, m.src]) });
     if (view.dataset.renderKey === renderKey && view.childElementCount > 0) {
         contentEl.style.height = view.dataset.contentHeight || `${listHeight}px`;
         return;
@@ -1307,7 +1445,11 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
 
     if (!matches.length) {
         const empty = document.createElement("div");
-        empty.textContent = "No GIFs in this category yet. Right-click a favorite to add one.";
+        empty.textContent = categoryQuery
+            ? "No GIFs match this category search."
+            : categoryId === MOST_USED_CATEGORY
+                ? "No usage yet. GIFs you send will appear here."
+                : "No GIFs in this category yet. Right-click a favorite to add one.";
         empty.style.cssText = "grid-column:1/-1;padding:24px 12px;color:var(--text-muted,#949ba4);text-align:center;font-size:13px;";
         view.append(empty);
         return;
@@ -1359,6 +1501,14 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
             image.loading = "lazy";
         }
         card.append(media);
+
+        if (categoryId === MOST_USED_CATEGORY) {
+            const usage = document.createElement("span");
+            const count = data.usage[item.key]?.count || 0;
+            usage.textContent = `${count} use${count === 1 ? "" : "s"}`;
+            usage.style.cssText = "position:absolute;left:6px;bottom:6px;z-index:2;padding:3px 6px;border-radius:8px;background:rgba(0,0,0,.72);color:white;font-size:11px;font-weight:600;pointer-events:none;";
+            card.append(usage);
+        }
 
         const favorite = templateFavorite?.cloneNode(true) as HTMLElement || document.createElement("div");
         favorite.className = templateFavorite ? classNameOf(templateFavorite) : classes.favorite;
@@ -1422,6 +1572,7 @@ function processCards() {
     // search or a hidden back/navigation flow.
     if (!inFavorites) {
         selectedCategory = null;
+        categoryQuery = "";
         restoreCategoryView();
         clearTemporaryHides(cards);
         return;
@@ -1497,6 +1648,17 @@ function onContextMenu(event: MouseEvent) {
     showContextMenu(event, card, nativeResultCards());
 }
 
+function onPickerClick(event: MouseEvent) {
+    if (categoryActivationInProgress || !isFavoritesView()) return;
+    const target = event.target as Element | null;
+    if (!target || target.closest(FAVORITE_BUTTON) || target.closest(DOWNLOAD_BUTTON)) return;
+    const card = closestPickerCard(target);
+    if (!card || card.dataset.favGifKey) return; // Synthetic category clicks record themselves.
+    const cards = nativeResultCards();
+    const key = cardKey(card, cards);
+    if (key) noteGifUsed(storedKeyFor(card, key));
+}
+
 function scan() {
     renderCategoryBar();
     processCards();
@@ -1534,6 +1696,7 @@ export default definePlugin({
     start() {
         migrateLegacySettings();
         scan();
+        document.addEventListener("click", onPickerClick, true);
         document.addEventListener("contextmenu", onContextMenu, true);
         observer = new MutationObserver(scheduleScan);
         observer.observe(document.body, { childList: true, subtree: true });
@@ -1542,6 +1705,7 @@ export default definePlugin({
         nativeGifSelector = null;
         observer?.disconnect();
         observer = null;
+        document.removeEventListener("click", onPickerClick, true);
         document.removeEventListener("contextmenu", onContextMenu, true);
         if (scanTimer != null) clearTimeout(scanTimer);
         scanTimer = null;
@@ -1554,5 +1718,6 @@ export default definePlugin({
             delete card.dataset.favGifCategoryKey;
         });
         selectedCategory = null;
+        categoryQuery = "";
     }
 });
