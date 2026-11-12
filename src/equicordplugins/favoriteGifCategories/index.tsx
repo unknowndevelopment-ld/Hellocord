@@ -461,6 +461,21 @@ function nativeResultCards(): HTMLElement[] {
 }
 
 /**
+ * Native result slots, including cards whose media has not mounted yet.
+ * `pickerCards` intentionally requires media, so it cannot see the empty
+ * placeholder cards that cause visible gaps while scrolling.
+ */
+function nativeResultCardSlots(): HTMLElement[] {
+    const results = resultContainers()[0];
+    const content = results && resultContent(results);
+    const layer = content?.firstElementChild;
+    if (!layer) return [];
+    const candidates = Array.from(layer.querySelectorAll<HTMLElement>(PICKER_CARD_PATTERN))
+        .filter(card => !card.closest(CATEGORY_VIEW_MARK) && !!favoriteControl(card));
+    return candidates.filter(card => !candidates.some(other => other !== card && card.contains(other)));
+}
+
+/**
  * Read the current build's hashed classes from a real card so synthetic
  * category tiles use exactly the same styling as native results.
  */
@@ -1799,6 +1814,52 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
     view.dataset.contentHeight = contentEl.style.height;
 }
 
+/**
+ * Discord's virtualized masonry renders a card before its media, which leaves
+ * empty absolute slots (visible as holes) until the image arrives. Read the
+ * card's own media URL from its React props and paint it as a background until
+ * the native media element mounts.
+ */
+function nativeCardMedia(card: HTMLElement): { src: string; format: number; } | null {
+    const fiberKey = Object.keys(card).find(key => key.startsWith("__reactFiber$"));
+    let fiber = fiberKey ? (card as any)[fiberKey] : null;
+    for (let depth = 0; depth < 8 && fiber; depth++, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        if (!props || typeof props !== "object" || !props.item || typeof props.src !== "string") continue;
+        return { src: props.src, format: Number(props.format) || 1 };
+    }
+    return null;
+}
+
+function clearNativeCardPreview(card: HTMLElement) {
+    if (!card.dataset.favGifPreview) return;
+    card.style.backgroundImage = card.dataset.favGifPreviewOriginal || "";
+    delete card.dataset.favGifPreview;
+    delete card.dataset.favGifPreviewOriginal;
+}
+
+function ensureNativeCardPreviews(cards: HTMLElement[]) {
+    for (const card of cards) {
+        if (card.querySelector("img, video")) {
+            clearNativeCardPreview(card);
+            continue;
+        }
+
+        const media = nativeCardMedia(card);
+        if (!media || media.format === 2 || /\.(mp4|webm)(?:\?|$)/i.test(media.src)) continue;
+        if (card.dataset.favGifPreview === media.src) continue;
+
+        if (card.dataset.favGifPreviewOriginal === undefined) {
+            card.dataset.favGifPreviewOriginal = card.style.backgroundImage;
+        }
+        card.dataset.favGifPreview = media.src;
+        card.style.backgroundImage = `url("${media.src.replace(/"/g, "\\\"")}")`;
+        card.style.backgroundSize = "cover";
+        card.style.backgroundPosition = "center";
+        card.style.backgroundRepeat = "no-repeat";
+    }
+}
+
 function processCards() {
     if (categoryActivationInProgress) return;
     const cards = nativeResultCards();
@@ -1826,6 +1887,7 @@ function processCards() {
 
     restoreCategoryView();
     clearTemporaryHides(cards);
+    ensureNativeCardPreviews(nativeResultCardSlots());
 
     for (const card of cards) {
         const key = cardKey(card, cards);
@@ -1957,6 +2019,7 @@ export default definePlugin({
         document.querySelectorAll(HEADER_MARK).forEach(el => el.remove());
         restoreCategoryView();
         clearTemporaryHides(pickerCards(document));
+        document.querySelectorAll<HTMLElement>("[data-fav-gif-preview]").forEach(clearNativeCardPreview);
         document.querySelectorAll<HTMLElement>("[data-fav-gif-category-key]").forEach(card => {
             delete card.dataset.favGifCategoryKey;
         });
