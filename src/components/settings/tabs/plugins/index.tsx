@@ -109,7 +109,15 @@ const enum SearchStatus {
     API_PLUGINS
 }
 
-const HELLOCORD_PLUGIN_NAMES = new Set(["Bulk Favorite GIFs", "GIF Categories", "GIF Downloader"]);
+const HELLOCORD_PLUGIN_NAMES = new Set([
+    "Bulk Favorite GIFs",
+    "GIF Categories",
+    "GIF Category Search",
+    "GIF Downloader",
+    "GIF Duplicate Finder",
+    "GIF Most Used",
+    "GIF Random Button"
+]);
 
 export const ExcludedReasons: Record<PluginTarget, string> = {
     desktop: "Discord Desktop app or Vesktop/Equibop",

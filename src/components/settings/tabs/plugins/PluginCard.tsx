@@ -35,7 +35,15 @@ export function PluginCard({ plugin, disabled, onRestartNeeded, onMouseEnter, on
     const pluginMeta = PluginMeta[plugin.name];
     const isEquicordPlugin = pluginMeta.folderName.startsWith("src/equicordplugins/") ?? false;
     const isVencordPlugin = pluginMeta.folderName.startsWith("src/plugins/") ?? false;
-    const isHellocordPlugin = ["Bulk Favorite GIFs", "GIF Categories", "GIF Downloader"].includes(plugin.name);
+    const isHellocordPlugin = [
+        "Bulk Favorite GIFs",
+        "GIF Categories",
+        "GIF Category Search",
+        "GIF Downloader",
+        "GIF Duplicate Finder",
+        "GIF Most Used",
+        "GIF Random Button"
+    ].includes(plugin.name);
     const isUserPlugin = pluginMeta?.userPlugin ?? false;
     const isModifiedPlugin = plugin.isModified ?? false;
 

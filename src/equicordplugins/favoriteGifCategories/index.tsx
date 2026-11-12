@@ -31,6 +31,8 @@ const CATEGORY_VIEW_MARK = "[data-fav-gif-category-view]";
 const HEADER_MARK = "[data-fav-gif-category-bar]";
 const FOLDER_ICON = "<svg aria-hidden=\"true\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><path d=\"M10 4H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H12l-2-2Z\"/></svg>";
 const MOST_USED_CATEGORY = "__most-used__";
+export type GifCategoryFeature = "mostUsed" | "duplicateFinder" | "categorySearch" | "randomButton";
+const enabledFeatures = new Set<GifCategoryFeature>();
 const BACKUP_FORMAT = "EquicordGifCategories";
 // Shared bundle key: this hides backup contents from casual inspection, but is
 // intentionally portable and is not a security boundary against plugin readers.
@@ -49,6 +51,18 @@ let suppressCategoryClick = false;
 let categoryActivationInProgress = false;
 let nativeGifSelector: ((gif: { url: string; [key: string]: any; }) => void) | null = null;
 let categoryQuery = "";
+
+export function setGifCategoryFeature(feature: GifCategoryFeature, enabled: boolean) {
+    if (enabled) enabledFeatures.add(feature);
+    else enabledFeatures.delete(feature);
+    if (feature === "mostUsed" && !enabled && selectedCategory === MOST_USED_CATEGORY) selectedCategory = null;
+    if (feature === "categorySearch" && !enabled) categoryQuery = "";
+    scheduleScan();
+}
+
+function hasFeature(feature: GifCategoryFeature) {
+    return enabledFeatures.has(feature);
+}
 
 function favoriteSearchInputs(root: ParentNode = document): HTMLInputElement[] {
     const candidates = Array.from(root.querySelectorAll<HTMLInputElement>("input"));
@@ -154,6 +168,7 @@ function forgetEntry(data: CategoryData, categoryId: string, key: string) {
 }
 
 function noteGifUsed(key: string) {
+    if (!hasFeature("mostUsed")) return;
     const canonical = canonicalKey(key);
     if (!canonical) return;
     const data = loadData();
@@ -1245,7 +1260,7 @@ function renderCategoryBar() {
     const existingBars = Array.from(document.querySelectorAll<HTMLElement>(HEADER_MARK));
     existingBars.slice(1).forEach(bar => bar.remove());
     const data = loadData();
-    const renderKey = JSON.stringify({ categories: data.categories, selectedCategory });
+    const renderKey = JSON.stringify({ categories: data.categories, selectedCategory, features: [...enabledFeatures].sort() });
     const existingBar = existingBars[0];
     if (existingBar?.dataset.renderKey === renderKey) return;
 
@@ -1344,7 +1359,7 @@ function renderCategoryBar() {
     };
 
     bar.append(button(null, "All"));
-    bar.append(button(MOST_USED_CATEGORY, "★ Most Used"));
+    if (hasFeature("mostUsed")) bar.append(button(MOST_USED_CATEGORY, "★ Most Used"));
     for (const category of data.categories) bar.append(button(category.id, category.name, true));
 
     const add = document.createElement("button");
@@ -1357,16 +1372,18 @@ function renderCategoryBar() {
     add.addEventListener("click", manageCategories);
     bar.append(add);
 
-    const duplicates = document.createElement("button");
-    isolateInjectedInteraction(duplicates);
-    duplicates.type = "button";
-    duplicates.textContent = "Duplicates";
-    duplicates.title = "Find and remove duplicate favorite GIFs";
-    duplicates.style.cssText = "height:26px;padding:0 9px;border:0;border-radius:4px;background:var(--background-secondary,#2b2d31);color:var(--text-normal,#dbdee1);font-size:12px;cursor:pointer;";
-    duplicates.addEventListener("click", () => void findAndRemoveDuplicates());
-    bar.append(duplicates);
+    if (hasFeature("duplicateFinder")) {
+        const duplicates = document.createElement("button");
+        isolateInjectedInteraction(duplicates);
+        duplicates.type = "button";
+        duplicates.textContent = "Duplicates";
+        duplicates.title = "Find and remove duplicate favorite GIFs";
+        duplicates.style.cssText = "height:26px;padding:0 9px;border:0;border-radius:4px;background:var(--background-secondary,#2b2d31);color:var(--text-normal,#dbdee1);font-size:12px;cursor:pointer;";
+        duplicates.addEventListener("click", () => void findAndRemoveDuplicates());
+        bar.append(duplicates);
+    }
 
-    if (selectedCategory) {
+    if (selectedCategory && hasFeature("categorySearch")) {
         const search = document.createElement("input");
         search.type = "search";
         search.value = categoryQuery;
@@ -1378,6 +1395,10 @@ function renderCategoryBar() {
             processCards();
         });
 
+        bar.append(search);
+    }
+
+    if (selectedCategory && hasFeature("randomButton")) {
         const random = document.createElement("button");
         isolateInjectedInteraction(random);
         random.type = "button";
@@ -1392,7 +1413,7 @@ function renderCategoryBar() {
             }
             selectCategoryGif(matches[Math.floor(Math.random() * matches.length)]);
         });
-        bar.append(search, random);
+        bar.append(random);
     }
 
     // The Favorites title, search field and Bulk Download button share a
@@ -1502,7 +1523,7 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
         }
         card.append(media);
 
-        if (categoryId === MOST_USED_CATEGORY) {
+        if (categoryId === MOST_USED_CATEGORY && hasFeature("mostUsed")) {
             const usage = document.createElement("span");
             const count = data.usage[item.key]?.count || 0;
             usage.textContent = `${count} use${count === 1 ? "" : "s"}`;
@@ -1649,7 +1670,7 @@ function onContextMenu(event: MouseEvent) {
 }
 
 function onPickerClick(event: MouseEvent) {
-    if (categoryActivationInProgress || !isFavoritesView()) return;
+    if (!hasFeature("mostUsed") || categoryActivationInProgress || !isFavoritesView()) return;
     const target = event.target as Element | null;
     if (!target || target.closest(FAVORITE_BUTTON) || target.closest(DOWNLOAD_BUTTON)) return;
     const card = closestPickerCard(target);
