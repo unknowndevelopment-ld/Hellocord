@@ -1662,16 +1662,29 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
         return;
     }
 
-    (view as any)._columnTops = [0, 0];
     const classes = pickerClasses();
     const templateFavorite = results.querySelector<HTMLElement>(FAVORITE_BUTTON);
     const templateDownload = results.querySelector<HTMLElement>(DOWNLOAD_BUTTON);
     const downloadSvg = `<svg class="${classes.icon}" aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-    // Two columns with 12px outer margins and a 12px gutter. Deriving this
-    // from the live result width keeps the grid correct at every drawer size.
-    const colWidth = Math.max(80, (results.clientWidth - 36) / 2);
-    const columns = [12, 24 + colWidth];
-    const columnTops = [0, 0];
+    const gap = 12;
+    const viewWidth = results.clientWidth;
+    const duplicateView = categoryId === DUPLICATES_CATEGORY;
+    // Match Discord's native GIF density: keep cards near 200px and add
+    // columns as the picker widens instead of stretching a fixed two-column
+    // layout. Duplicate rows stay as a centered pair so they can be compared.
+    let colWidth: number;
+    let columns: number[];
+    if (duplicateView) {
+        colWidth = Math.min(360, Math.max(80, (viewWidth - 36) / 2));
+        const pairWidth = colWidth * 2 + gap;
+        const pairLeft = Math.max(12, (viewWidth - pairWidth) / 2);
+        columns = [pairLeft, pairLeft + colWidth + gap];
+    } else {
+        const columnCount = Math.max(2, Math.floor(viewWidth / 200));
+        colWidth = Math.max(80, (viewWidth - 16 - gap * (columnCount - 1)) / columnCount);
+        columns = Array.from({ length: columnCount }, (_, index) => 12 + index * (colWidth + gap));
+    }
+    const columnTops = new Array(columns.length).fill(0);
     let duplicateRowTop = 0;
     let duplicateRowHeight = 0;
     for (const [index, item] of matches.entries()) {
@@ -1685,15 +1698,16 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
 
         const ratio = item.width > 0 && item.height > 0 ? item.height / item.width : 1.125;
         const cardHeight = Math.max(80, Math.min(520, colWidth * ratio));
-        const duplicateView = categoryId === DUPLICATES_CATEGORY;
-        const column = duplicateView ? index % 2 : columnTops[0] <= columnTops[1] ? 0 : 1;
+        const column = duplicateView
+            ? index % 2
+            : columnTops.indexOf(Math.min(...columnTops));
         const top = duplicateView ? duplicateRowTop : columnTops[column];
         card.style.cssText = `position:absolute;left:${columns[column]}px;width:${colWidth}px;top:${top}px;height:${cardHeight}px;overflow:hidden;border-radius:8px;cursor:pointer;`;
-        columnTops[column] = top + cardHeight + 12;
+        columnTops[column] = top + cardHeight + gap;
         if (duplicateView) {
             duplicateRowHeight = Math.max(duplicateRowHeight, cardHeight);
             if (column === 1 || index === matches.length - 1) {
-                duplicateRowTop += duplicateRowHeight + 12;
+                duplicateRowTop += duplicateRowHeight + gap;
                 duplicateRowHeight = 0;
             }
         }
@@ -1781,7 +1795,7 @@ function renderCategoryView(content: HTMLElement, categoryId: string, data: Cate
         card.append(download, favorite);
         view.append(card);
     }
-    contentEl.style.height = `${Math.max(columnTops[0], columnTops[1]) + 12}px`;
+    contentEl.style.height = `${Math.max(...columnTops) + 12}px`;
     view.dataset.contentHeight = contentEl.style.height;
 }
 
