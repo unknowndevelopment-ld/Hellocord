@@ -1414,7 +1414,32 @@ function renderCategoryBar() {
     if (!existingBar) bar.setAttribute("data-fav-gif-category-bar", "true");
     bar.replaceChildren();
     bar.dataset.renderKey = renderKey;
-    bar.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 0 100%;align-self:stretch;width:100%;min-width:0;padding:8px 12px 4px;box-sizing:border-box;";
+    bar.style.cssText = "display:flex;flex-direction:column;gap:7px;flex:0 0 100%;align-self:stretch;width:100%;min-width:0;padding:8px 12px 7px;box-sizing:border-box;border-top:1px solid var(--background-modifier-accent,rgba(255,255,255,.08));border-bottom:1px solid var(--background-modifier-accent,rgba(255,255,255,.08));background:color-mix(in srgb,var(--background-secondary,#2b2d31) 36%,transparent);";
+
+    const categoryRow = document.createElement("div");
+    categoryRow.setAttribute("data-fav-gif-category-list", "true");
+    categoryRow.style.cssText = "display:flex;align-items:center;gap:6px;width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;overscroll-behavior-x:contain;padding:1px 0;";
+    categoryRow.addEventListener("wheel", event => {
+        if (categoryRow.scrollWidth <= categoryRow.clientWidth || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+        event.preventDefault();
+        categoryRow.scrollLeft += event.deltaY;
+    }, { passive: false });
+
+    const actionRow = document.createElement("div");
+    actionRow.setAttribute("data-fav-gif-category-actions", "true");
+    actionRow.style.cssText = "display:flex;align-items:center;gap:6px;width:100%;min-width:0;";
+    bar.append(categoryRow, actionRow);
+
+    const addHoverEffect = (element: HTMLElement) => {
+        element.addEventListener("mouseenter", () => {
+            element.style.filter = "brightness(1.12)";
+            element.style.transform = "translateY(-1px)";
+        });
+        element.addEventListener("mouseleave", () => {
+            element.style.filter = "";
+            element.style.transform = "";
+        });
+    };
 
     const button = (id: string | null, name: string, icon = false) => {
         const b = document.createElement("button");
@@ -1422,7 +1447,9 @@ function renderCategoryBar() {
         isolateInjectedInteraction(b);
         b.type = "button";
         b.dataset.categoryId = id || "";
-        b.style.cssText = `display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 9px;line-height:1;border-radius:14px;border:1px solid var(--background-modifier-accent,rgba(255,255,255,.12));background:${selectedCategory === id ? "var(--brand-experiment,#5865f2)" : "var(--background-secondary,#2b2d31)"};color:var(--text-normal,#dbdee1);font-size:12px;cursor:${isSavedCategory ? "grab" : "pointer"};`;
+        b.setAttribute("aria-pressed", String(selectedCategory === id));
+        b.style.cssText = `display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;gap:5px;height:28px;padding:0 10px;box-sizing:border-box;line-height:1;border-radius:14px;border:1px solid ${selectedCategory === id ? "color-mix(in srgb,var(--brand-experiment,#5865f2) 75%,white)" : "var(--background-modifier-accent,rgba(255,255,255,.12))"};background:${selectedCategory === id ? "var(--brand-experiment,#5865f2)" : "var(--background-secondary,#2b2d31)"};color:${selectedCategory === id ? "white" : "var(--text-normal,#dbdee1)"};font-size:12px;font-weight:${selectedCategory === id ? "600" : "500"};white-space:nowrap;cursor:${isSavedCategory ? "grab" : "pointer"};transition:filter 120ms ease,transform 120ms ease,background 120ms ease;`;
+        addHoverEffect(b);
         if (icon) b.insertAdjacentHTML("afterbegin", FOLDER_ICON);
         const text = document.createElement("span");
         text.textContent = name;
@@ -1499,13 +1526,13 @@ function renderCategoryBar() {
         return b;
     };
 
-    bar.append(button(null, "All"));
-    if (hasFeature("mostUsed")) bar.append(button(MOST_USED_CATEGORY, "★ Most Used"));
+    categoryRow.append(button(null, "All"));
+    if (hasFeature("mostUsed")) categoryRow.append(button(MOST_USED_CATEGORY, "★ Most Used"));
     if (hasFeature("duplicateFinder") && duplicateGroups.length) {
         const duplicateCount = duplicateGroups.reduce((total, group) => total + group.length - 1, 0);
-        bar.append(button(DUPLICATES_CATEGORY, `⚠ Duplicates (${duplicateCount})`));
+        categoryRow.append(button(DUPLICATES_CATEGORY, `⚠ Duplicates (${duplicateCount})`));
     }
-    for (const category of data.categories) bar.append(button(category.id, category.name, true));
+    for (const category of data.categories) categoryRow.append(button(category.id, category.name, true));
 
     const add = document.createElement("button");
     isolateInjectedInteraction(add);
@@ -1513,9 +1540,10 @@ function renderCategoryBar() {
     add.textContent = "＋";
     add.title = "Create or manage GIF categories";
     add.setAttribute("aria-label", "Create or manage GIF categories");
-    add.style.cssText = "display:inline-flex;align-items:center;justify-content:center;flex:0 0 26px;width:26px;height:26px;padding:0;box-sizing:border-box;border-radius:50%;border:0;background:var(--background-secondary,#2b2d31);color:var(--text-normal,#dbdee1);font-size:18px;line-height:1;cursor:pointer;";
+    add.style.cssText = "display:inline-flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;height:28px;padding:0;box-sizing:border-box;border-radius:50%;border:1px dashed var(--interactive-muted,#4e5058);background:transparent;color:var(--interactive-normal,#b5bac1);font-size:18px;line-height:1;cursor:pointer;transition:filter 120ms ease,transform 120ms ease;";
+    addHoverEffect(add);
     add.addEventListener("click", manageCategories);
-    bar.append(add);
+    categoryRow.append(add);
 
     if (hasFeature("duplicateFinder")) {
         const duplicates = document.createElement("button");
@@ -1523,9 +1551,10 @@ function renderCategoryBar() {
         duplicates.type = "button";
         duplicates.textContent = duplicateGroups.length ? "Rescan Duplicates" : "Find Duplicates";
         duplicates.title = "Find duplicate favorite GIFs and show them side by side";
-        duplicates.style.cssText = "height:26px;padding:0 9px;border:0;border-radius:4px;background:var(--background-secondary,#2b2d31);color:var(--text-normal,#dbdee1);font-size:12px;cursor:pointer;";
+        duplicates.style.cssText = "height:28px;padding:0 10px;border:1px solid var(--background-modifier-accent,rgba(255,255,255,.12));border-radius:6px;background:var(--background-secondary,#2b2d31);color:var(--text-normal,#dbdee1);font-size:12px;font-weight:600;cursor:pointer;transition:filter 120ms ease,transform 120ms ease;";
+        addHoverEffect(duplicates);
         duplicates.addEventListener("click", showDuplicates);
-        bar.append(duplicates);
+        actionRow.append(duplicates);
 
         if (selectedCategory === DUPLICATES_CATEGORY && duplicateGroups.length) {
             const remove = document.createElement("button");
@@ -1533,9 +1562,10 @@ function renderCategoryBar() {
             remove.type = "button";
             remove.textContent = "Remove Duplicates";
             remove.title = "Keep the newest copy in each row and remove the others";
-            remove.style.cssText = "height:26px;padding:0 9px;border:0;border-radius:4px;background:var(--status-danger,#da373c);color:white;font-size:12px;font-weight:600;cursor:pointer;";
+            remove.style.cssText = "height:28px;padding:0 10px;border:0;border-radius:6px;background:var(--status-danger,#da373c);color:white;font-size:12px;font-weight:600;cursor:pointer;transition:filter 120ms ease,transform 120ms ease;";
+            addHoverEffect(remove);
             remove.addEventListener("click", () => void removeFoundDuplicates());
-            bar.append(remove);
+            actionRow.append(remove);
         }
     }
 
@@ -1545,7 +1575,8 @@ function renderCategoryBar() {
         random.type = "button";
         random.textContent = "🎲 Random";
         random.title = "Send a random GIF from this view";
-        random.style.cssText = "height:26px;padding:0 9px;border:0;border-radius:4px;background:var(--brand-experiment,#5865f2);color:white;font-size:12px;font-weight:600;cursor:pointer;";
+        random.style.cssText = "height:28px;margin-left:auto;padding:0 10px;border:0;border-radius:6px;background:var(--brand-experiment,#5865f2);color:white;font-size:12px;font-weight:600;cursor:pointer;transition:filter 120ms ease,transform 120ms ease;";
+        addHoverEffect(random);
         random.addEventListener("click", () => {
             const matches = categoryItems(selectedCategory!, loadData());
             if (!matches.length) {
@@ -1554,7 +1585,7 @@ function renderCategoryBar() {
             }
             selectCategoryGif(matches[Math.floor(Math.random() * matches.length)]);
         });
-        bar.append(random);
+        actionRow.append(random);
     }
 
     // The Favorites title, search field and Bulk Download button share a
