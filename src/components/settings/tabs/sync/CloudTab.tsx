@@ -30,6 +30,7 @@ import { Link } from "@components/Link";
 import { Notice } from "@components/Notice";
 import { Paragraph } from "@components/Paragraph";
 import { SettingsTab, wrapTab } from "@components/settings/tabs/BaseTab";
+import { HELLOCORD_LOGO } from "@utils/hellocordLogo";
 import { localStorage } from "@utils/localStorage";
 import { Margins } from "@utils/margins";
 import { useForceUpdater } from "@utils/react";
@@ -47,7 +48,7 @@ function VencordIcon() {
 }
 
 function HellocordIcon() {
-    return <img src="https://r2.trendymanage.gdinc.dev/Ric8F1vjy1O1RRVNlaWe9/e2d96c61-7de5-4616-8fba-58999939222e.png" alt="Hellocord" style={ICON_STYLE} />;
+    return <img src={HELLOCORD_LOGO} alt="Hellocord" style={ICON_STYLE} />;
 }
 
 const RefreshIcon = findComponentByCodeLazy("M4 12a8 8 0 0 1 14.93-4H15");

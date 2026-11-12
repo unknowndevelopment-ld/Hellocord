@@ -10,6 +10,7 @@ import { Settings } from "@api/Settings";
 import { CogWheel, InfoIcon } from "@components/Icons";
 import { AddonCard } from "@components/settings/AddonCard";
 import { classNameFactory } from "@utils/css";
+import { HELLOCORD_LOGO } from "@utils/hellocordLogo";
 import { Logger } from "@utils/Logger";
 import { Plugin } from "@utils/types";
 import { React, showToast } from "@webpack/common";
@@ -97,7 +98,7 @@ export function PluginCard({ plugin, disabled, onRestartNeeded, onMouseEnter, on
         },
         {
             condition: isHellocordPlugin,
-            src: "https://r2.trendymanage.gdinc.dev/Ric8F1vjy1O1RRVNlaWe9/e2d96c61-7de5-4616-8fba-58999939222e.png",
+            src: HELLOCORD_LOGO,
             alt: "Hellocord",
             title: "Hellocord Plugin"
         },
