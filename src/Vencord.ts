@@ -32,7 +32,16 @@ export * as WebpackPatcher from "./webpack/patchWebpack";
 export { PlainSettings, Settings };
 
 import { enableStyle, initStyles } from "@api/Styles";
-import { openSettingsTabModal, UpdaterTab } from "@components/settings";
+import { ChangelogTab, openSettingsTabModal, UpdaterTab } from "@components/settings";
+import {
+    getCommitsSinceLastSeen,
+    getLastSeenHash,
+    getNewPlugins,
+    getNewSettings,
+    getUpdatedPlugins,
+    initializeChangelog,
+    saveUpdateSession,
+} from "@components/settings/tabs/changelog/changelogManager";
 import { debounce } from "@shared/debounce";
 import { StartAt } from "@utils/types";
 import { SettingsRouter } from "@webpack/common";
@@ -44,7 +53,7 @@ import { initPluginManager, PMLogger, startAllPlugins } from "./api/PluginManage
 import { PlainSettings, Settings, SettingsStore } from "./api/Settings";
 import { areLocalSettingsDirty, getCloudSettings, getCloudSyncDirection, markLocalSettingsDirty, putCloudSettings, shouldCloudSync } from "./api/SettingsSync/cloudSync";
 import { relaunch } from "./utils/native";
-import { checkForUpdates, update, UpdateLogger } from "./utils/updater";
+import { checkForUpdates, getRepo, update, UpdateLogger } from "./utils/updater";
 import { onceReady } from "./webpack";
 import { patches } from "./webpack/patchWebpack";
 
@@ -121,6 +130,46 @@ async function syncSettings() {
 
 let notifiedForUpdatesThisSession = false;
 
+async function showInstalledUpdateSummary() {
+    if (IS_WEB || IS_UPDATER_DISABLED) return;
+
+    try {
+        const previousHash = await getLastSeenHash();
+        if (!previousHash) {
+            await initializeChangelog();
+            return;
+        }
+
+        const commits = await getCommitsSinceLastSeen(await getRepo());
+        if (!commits.length) return;
+
+        const [newPlugins, updatedPlugins, newSettings] = await Promise.all([
+            getNewPlugins(),
+            getUpdatedPlugins(),
+            getNewSettings(),
+        ]);
+        await saveUpdateSession(commits, newPlugins, updatedPlugins, newSettings);
+
+        const additions = [
+            newPlugins.length && `${newPlugins.length} new plugin${newPlugins.length === 1 ? "" : "s"}`,
+            newSettings.size && `new settings for ${newSettings.size} plugin${newSettings.size === 1 ? "" : "s"}`,
+        ].filter(Boolean);
+        const latest = commits.at(-1)?.message;
+        const details = additions.length
+            ? additions.join(" and ")
+            : `${commits.length} installed change${commits.length === 1 ? "" : "s"}`;
+
+        showNotification({
+            title: "Hellocord Updated — What's New",
+            body: latest ? `${details}. Latest: ${latest}` : details,
+            color: "var(--green-360)",
+            onClick: () => openSettingsTabModal(ChangelogTab!),
+        });
+    } catch (err) {
+        UpdateLogger.error("Failed to prepare the installed update summary", err);
+    }
+}
+
 async function runUpdateCheck() {
     if (IS_UPDATER_DISABLED) return;
 
@@ -161,6 +210,7 @@ async function init() {
     startAllPlugins(StartAt.WebpackReady);
 
     syncSettings();
+    showInstalledUpdateSummary();
 
     if (!IS_DEV && !IS_WEB && !IS_UPDATER_DISABLED) {
         runUpdateCheck();

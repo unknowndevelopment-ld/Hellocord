@@ -1,42 +1,42 @@
 name: Build Hellocord release
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+    push:
+        branches: [main]
+    workflow_dispatch:
 
 permissions:
-  contents: write
+    contents: write
 
 concurrency:
-  group: hellocord-release-${{ github.ref }}
-  cancel-in-progress: true
+    group: hellocord-release-${{ github.ref }}
+    cancel-in-progress: true
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12.16.1
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm buildWebStandalone
-      - run: pnpm buildStandalone
-      - name: Publish latest Hellocord desktop build
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          short_sha="$(git rev-parse --short HEAD)"
-          tag="hellocord-${short_sha}"
-          title="Hellocord ${short_sha}"
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/desktop.asar --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "$title" --latest
-          else
-            gh release create "$tag" dist/desktop.asar --repo "$GITHUB_REPOSITORY" --title "$title" --notes "Automated Hellocord desktop build from commit ${GITHUB_SHA}." --latest --target "$GITHUB_SHA"
-          fi
+    release:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 12.16.1
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+                  cache: pnpm
+            - run: pnpm install --frozen-lockfile
+            - run: pnpm buildWebStandalone
+            - run: pnpm buildStandalone
+            - name: Publish latest Hellocord desktop build
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  short_sha="$(git rev-parse --short HEAD)"
+                  tag="hellocord-${short_sha}"
+                  title="Hellocord ${short_sha}"
+                  if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                    gh release upload "$tag" dist/desktop.asar --repo "$GITHUB_REPOSITORY" --clobber
+                    gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "$title" --latest
+                  else
+                    gh release create "$tag" dist/desktop.asar --repo "$GITHUB_REPOSITORY" --title "$title" --notes "Automated Hellocord desktop build from commit ${GITHUB_SHA}." --latest --target "$GITHUB_SHA"
+                  fi
