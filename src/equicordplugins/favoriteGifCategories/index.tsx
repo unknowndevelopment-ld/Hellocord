@@ -1414,7 +1414,7 @@ function renderCategoryBar() {
     if (!existingBar) bar.setAttribute("data-fav-gif-category-bar", "true");
     bar.replaceChildren();
     bar.dataset.renderKey = renderKey;
-    bar.style.cssText = "display:flex;flex-direction:column;gap:7px;flex:0 0 100%;align-self:stretch;width:100%;min-width:0;padding:8px 12px 7px;box-sizing:border-box;border-top:1px solid var(--background-modifier-accent,rgba(255,255,255,.08));border-bottom:1px solid var(--background-modifier-accent,rgba(255,255,255,.08));background:color-mix(in srgb,var(--background-secondary,#2b2d31) 36%,transparent);";
+    bar.style.cssText = "display:flex;flex-direction:column;gap:7px;flex:0 0 100%;align-self:stretch;width:100%;min-width:0;padding:6px 12px 7px;box-sizing:border-box;background:transparent;";
 
     const categoryRow = document.createElement("div");
     categoryRow.setAttribute("data-fav-gif-category-list", "true");
