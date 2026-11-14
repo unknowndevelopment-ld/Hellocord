@@ -43,7 +43,9 @@ jobs:
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   repository: ${{ inputs.pr_repo || github.repository }}
-                  ref: ${{ inputs.ref || (github.event_name == 'schedule' && 'dev' || github.ref) }}
+                  # Scheduled runs should test the default branch. Upstream uses
+                  # `dev` here, but this fork develops and releases from `main`.
+                  ref: ${{ inputs.ref || github.ref }}
 
             - name: Setup PNPM
               uses: pnpm/setup@fa36a5ef7dcdefc3a7cb25655c122e00cf6e636e # v3.1.2

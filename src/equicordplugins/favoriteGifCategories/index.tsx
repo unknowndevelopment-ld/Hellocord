@@ -1983,16 +1983,17 @@ export default definePlugin({
     patches: [{
         find: "#{intl::EXPRESSION_PICKER_CATEGORIES_A11Y_LABEL}",
         replacement: {
-            // Capture the GIF callback from the same picker body expression
-            // used by Favorite Anything; the simpler property-only match can
-            // miss this callback in Discord's minified component.
-            match: /\{onSelectGIF:(\i),[^}]{20,40}\}\):null,(?=(\i)===)/,
-            replace: "$&$self.captureGifSelector($1),"
+            // Wrap the picker props so the GIF callback is captured without
+            // touching the GIF tab's JSX. Favorite Anything inserts code after
+            // that JSX, so patching the same spot would make one of the two
+            // replacements fail depending on plugin order.
+            match: /(hideGifFavorites:\i,onSelectGIF:\i,[^}]*\}=)(\i),/,
+            replace: "$1$self.captureGifPicker($2),"
         }
     }],
-    captureGifSelector(callback: (gif: { url: string; [key: string]: any; }) => void) {
-        nativeGifSelector = callback;
-        return callback;
+    captureGifPicker(props: { onSelectGIF?: (gif: { url: string; [key: string]: any; }) => void; }) {
+        if (typeof props.onSelectGIF === "function") nativeGifSelector = props.onSelectGIF;
+        return props;
     },
     start() {
         migrateLegacySettings();
