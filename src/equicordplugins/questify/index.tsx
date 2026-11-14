@@ -487,12 +487,14 @@ export default definePlugin({
             replacement: [
                 {
                     // Subscribes each Quest tile to Questify's manual rerender trigger.
-                    match: /(?=return\(0,\i\.\i\)\(\i\.\i\.Provider,\{value:)/,
+                    // Stable uses `Scope.Provider`, canary adds another module level.
+                    match: /(?=return\(0,\i\.\i\)\(\i\.\i(?:\.Provider)?,\{value:)/,
                     replace: "void $self.useQuestRerender();"
                 },
                 {
                     // Adds Questify tile classes and inline CSS variables.
-                    match: /(?<=className:)(\i\(\)\(\i\.\i,\i,.{1,40}?\))(?=,onMouseEnter)/,
+                    // Stable calls the class helper with two args, canary with an extra one.
+                    match: /(?<=className:)(\i\(\)\(\i\.\i,\i(?:,.{1,40}?)?\))(?=,onMouseEnter)/,
                     replace: "$self.getQuestTileClasses($1,arguments[0].quest),style:$self.getQuestTileStyle(arguments[0].quest)"
                 },
                 {

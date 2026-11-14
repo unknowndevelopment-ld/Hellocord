@@ -895,7 +895,8 @@ export default definePlugin({
                 },
                 {
                     // Keep ongoing scrolling when correcting for embed height changes.
-                    match: /(?<=fixedScrollTop:)\i\(\i,\i\)-\((\i)\.offsetFromTop\+\i\)/,
+                    // Stable passes the offset directly; canary wraps it in a helper call.
+                    match: /(?<=fixedScrollTop:)(?:\i\.offsetTop|\i\(\i,\i\))-\((\i)\.offsetFromTop\+\i\)/,
                     replace: "$self.isActive(this)&&$1===this.automaticAnchor?$self.getAutomaticAnchorScrollTop(this,$1,$&):$&"
                 }
             ]
